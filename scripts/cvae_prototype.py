@@ -23,10 +23,9 @@ def sin_loss(arr: np.ndarray) -> float:
 
 # Define loss function that the decoder uses during training
 def loss_function(recon_x, x, mu, logvar):
-    
-    BCE = F.binary_cross_entropy(recon_x, x, reduction='sum')
-    KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-    return BCE + KLD
+    MSE = F.mse_loss(recon_x, x, reduction='sum')
+    KLD = -torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+    return MSE + beta_factor * KLD
 
 # Define custom PyTorch compatable dataset
 class WaveformDataset(Dataset):
@@ -52,29 +51,54 @@ class WaveformDataset(Dataset):
 
 # Pytorch model definition. All Pytorch models must extend nn.Module
 class CVAE(nn.Module):
-    def __init__(self, feature_size, latent_size, condition_size=1, hidden_size=50): # Assuming performance of size 1
+    def __init__(self, feature_size, latent_size, condition_size=1, hidden_size1=75,
+                 hidden_size2=25, dropout_rate=0, kernel_size=9, padding_size = 3): # Assuming performance of size 1
         super().__init__()
         self.feature_size = feature_size
         self.latent_size = latent_size
         self.condition_size = condition_size
 
         # Encoder layers
-        self.fc1 = nn.Linear(feature_size + condition_size, hidden_size)
-        self.fc21 = nn.Linear(hidden_size, latent_size)
-        self.fc22 = nn.Linear(hidden_size, latent_size)
+        self.fc1 = nn.Linear(feature_size + condition_size, hidden_size1)
+        self.fc12 = nn.Linear(hidden_size1, hidden_size2)
+        self.fc21 = nn.Linear(hidden_size2, latent_size)
+        self.fc22 = nn.Linear(hidden_size2, latent_size)
+
+        self.conv11 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=kernel_size, padding=padding_size)
+        self.conv12 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=kernel_size, padding=padding_size)
+        self.conv21 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=kernel_size, padding=padding_size)
+        self.conv22 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=kernel_size, padding=padding_size)
+
+        self.dropout1 = nn.Dropout(dropout_rate)
+        self.dropout2 = nn.Dropout(dropout_rate)
 
         # Decoder layers
-        self.fc3 = nn.Linear(latent_size + condition_size, hidden_size)
-        self.fc4 = nn.Linear(hidden_size, feature_size)
+        self.fc3 = nn.Linear(latent_size + condition_size, hidden_size2)
+        self.fc4 = nn.Linear(hidden_size2, hidden_size1)
+        self.fc5 = nn.Linear(hidden_size1, feature_size)
 
         # Activation functions
         self.relu = nn.ReLU()
 
+        # Initialize weights with He initialization
+        self._apply_he_initialization()
+
 
     def encode(self, x, c): # Q(z|x, c) function that takes x and condition, and gives us latent z
         # Add condition to inputs
+        inputs = self.conv11(x.unsqueeze(1))
+        inputs = inputs.squeeze(1)
+        inputs = self.relu(inputs)
         inputs = torch.cat([x, c.unsqueeze(1)], 1) # c may need unqsueeze(1)
         h1 = self.relu(self.fc1(inputs))
+
+        h1 = self.dropout1(h1)
+
+        h1 = self.relu(self.fc12(h1))
+
+        h1 = self.conv12(h1.unsqueeze(1))
+        h1 = h1.squeeze(1)
+
         z_mu = self.fc21(h1)
         z_va = self.fc22(h1)
         return z_mu, z_va
@@ -84,18 +108,31 @@ class CVAE(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps*std
     
-    def decode(self, z, c): # P(x|z, c) probability distribution of x given latent z and condition c
+    def decode(self, z, c): # P(x|z, c) probability distribution of x given latent z and condition c\
         inputs = torch.cat([z, c.unsqueeze(1)], 1)
         h3 = self.relu(self.fc3(inputs))
-        h4 = self.fc4(h3)
-        return h4
-
+        h3 = self.dropout2(h3)
+        h3 = self.conv21(h3.unsqueeze(1))
+        h3 = h3.squeeze(1)
+        h4 = self.relu(self.fc4(h3))
+        h4 = self.conv22(h4.unsqueeze(1))
+        h4 = h4.squeeze(1)
+        h5 = self.fc5(h4)
+        return h5
 
     def forward(self, x, c):
         mu, logvar = self.encode(x, c)
         z = self.reparameterize(mu, logvar)
         x_predict = self.decode(z, c)
         return x_predict, mu, logvar
+    
+    def _apply_he_initialization(self):
+        # Apply He initialization to fully connected and convolutional layers
+        for m in self.modules():
+            if isinstance(m, nn.Linear) or isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
 
     
 # Defines train behavior 
