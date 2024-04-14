@@ -60,21 +60,17 @@ class CVAE(nn.Module):
 
         # Encoder layers
         self.fc1 = nn.Linear(feature_size + condition_size, hidden_size1)
-        self.fc12 = nn.Linear(hidden_size1, hidden_size2)
-        self.fc21 = nn.Linear(hidden_size2, latent_size)
-        self.fc22 = nn.Linear(hidden_size2, latent_size)
+        self.fc21 = nn.Linear(hidden_size1, latent_size)
+        self.fc22 = nn.Linear(hidden_size1, latent_size)
 
         self.conv11 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=kernel_size, padding=padding_size)
-        self.conv12 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=kernel_size, padding=padding_size)
-        self.conv21 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=kernel_size, padding=padding_size)
         self.conv22 = nn.Conv1d(in_channels=1, out_channels=1, kernel_size=kernel_size, padding=padding_size)
 
         self.dropout1 = nn.Dropout(dropout_rate)
         self.dropout2 = nn.Dropout(dropout_rate)
 
         # Decoder layers
-        self.fc3 = nn.Linear(latent_size + condition_size, hidden_size2)
-        self.fc4 = nn.Linear(hidden_size2, hidden_size1)
+        self.fc3 = nn.Linear(latent_size + condition_size, hidden_size1)
         self.fc5 = nn.Linear(hidden_size1, feature_size)
 
         # Activation functions
@@ -91,14 +87,7 @@ class CVAE(nn.Module):
         inputs = self.relu(inputs)
         inputs = torch.cat([x, c.unsqueeze(1)], 1) # c may need unqsueeze(1)
         h1 = self.relu(self.fc1(inputs))
-
         h1 = self.dropout1(h1)
-
-        h1 = self.relu(self.fc12(h1))
-
-        h1 = self.conv12(h1.unsqueeze(1))
-        h1 = h1.squeeze(1)
-
         z_mu = self.fc21(h1)
         z_va = self.fc22(h1)
         return z_mu, z_va
@@ -112,13 +101,10 @@ class CVAE(nn.Module):
         inputs = torch.cat([z, c.unsqueeze(1)], 1)
         h3 = self.relu(self.fc3(inputs))
         h3 = self.dropout2(h3)
-        h3 = self.conv21(h3.unsqueeze(1))
+        h3 = self.conv22(h3.unsqueeze(1))
         h3 = h3.squeeze(1)
-        h4 = self.relu(self.fc4(h3))
-        h4 = self.conv22(h4.unsqueeze(1))
-        h4 = h4.squeeze(1)
-        h5 = self.fc5(h4)
-        return h5
+        h4 = self.fc5(h3)
+        return h4
 
     def forward(self, x, c):
         mu, logvar = self.encode(x, c)
