@@ -1,7 +1,7 @@
-name: ml_driven_peled
+name: mldrivenpeled
 channels:
   - conda-forge
-  - pytorch # Necessary for pytorch installation
+  - pytorch # Necessary for pytorch installation. If using cuda, may need different import
   - defaults
 dependencies:
   - pip>=23
