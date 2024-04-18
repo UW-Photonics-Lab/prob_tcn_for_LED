@@ -58,7 +58,8 @@ class CVAE(nn.Module):
                  hidden_size=100,
                  dropout_rate=0, 
                  kernel_size=5, 
-                 padding = 2): # Assuming performance of size 1
+                 padding = 2,
+                 padding_tuner = 0): #Used to tweak final output size (see final convoluation layer of decoder)
         super().__init__()
         self.feature_size = feature_size
         self.latent_size = latent_size
@@ -72,7 +73,7 @@ class CVAE(nn.Module):
             nn.Conv1d(32, 64, kernel_size=kernel_size, stride=2, padding=padding), 
             nn.ReLU(),
             nn.Flatten(), # Flatten all channels
-            nn.Linear(64 * ((feature_size // 4) + 1), latent_size * 2) # Introduce two subarrays for mu and logvar
+            nn.Linear(64 * ((feature_size // 4)), latent_size * 2) # Introduce two subarrays for mu and logvar
         )
         self.z_mu_layers = nn.Sequential(
             nn.Linear(hidden_size, latent_size)
@@ -90,7 +91,7 @@ class CVAE(nn.Module):
             nn.ReLU(),
             nn.ConvTranspose1d(32, 16, kernel_size=kernel_size, stride=2, padding=padding, output_padding=1),
             nn.ReLU(),
-            nn.ConvTranspose1d(16, 1, kernel_size=kernel_size, stride=1, padding=padding, output_padding=2),
+            nn.ConvTranspose1d(16, 1, kernel_size=kernel_size, stride=1,  padding=(padding + padding_tuner), output_padding=0),
         )
 
         # Initialize weights with He initialization
@@ -133,6 +134,13 @@ class CVAE(nn.Module):
                 nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
+
+
+    def calculate_convolution_transpose_size(input_size, stride, dilation, kernel_size, padding, output_padding) -> int:
+        return (input_size - 1) * stride - 2 * padding + dilation * (kernel_size - 1) + output_padding + 1
+    
+    def calculate_convolution_size(input_size, padding, dilation, kernel_size, stride) -> int:
+        return np.floor(((input_size + 2 * padding - dilation * (kernel_size - 1) - 1) / stride) + 1)
 
     
 # Defines train behavior 
