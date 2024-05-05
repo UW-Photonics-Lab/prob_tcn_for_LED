@@ -67,13 +67,19 @@ class CVAE(nn.Module):
 
         self.encoder_convolutional_layers = nn.Sequential(
             nn.Conv1d(1, 16, kernel_size=kernel_size, stride=1, padding=padding),
-            nn.ReLU(),
+            nn.LeakyReLU(),
+            # nn.MaxPool1d(stride = 1, dilation=1, kernel_size=3, padding=1),
+
             nn.Conv1d(16, 32, kernel_size=kernel_size, stride=2, padding=padding),
-            nn.ReLU(),
+            nn.LeakyReLU(),
+            # nn.MaxPool1d(stride = 1, dilation=1, kernel_size=3, padding=1),
+
             nn.Conv1d(32, 64, kernel_size=kernel_size, stride=2, padding=padding), 
-            nn.ReLU(),
+            nn.LeakyReLU(),
+            # nn.MaxPool1d(stride = 1, dilation=1, kernel_size=3, padding=1),
+
             nn.Flatten(), # Flatten all channels
-            nn.Linear(64 * ((feature_size // 4)), latent_size * 2) # Introduce two subarrays for mu and logvar
+            nn.Linear(64 * ((feature_size // 4) + 1), latent_size * 2) # Introduce two subarrays for mu and logvar
         )
         self.z_mu_layers = nn.Sequential(
             nn.Linear(hidden_size, latent_size)
@@ -84,16 +90,15 @@ class CVAE(nn.Module):
         )
 
         # Sets up correct dims for convolution
-        self.decoder_input = nn.Linear(latent_size + condition_size, 64 * (feature_size // 4)) # Small clipping error
+        self.decoder_input = nn.Linear(latent_size + condition_size, 64 * ((feature_size // 4))) # Small clipping error
 
         self.decoder_convolutional_layers = nn.Sequential(
             nn.ConvTranspose1d(64, 32, kernel_size=kernel_size, stride=2, padding=padding, output_padding=1),  
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.ConvTranspose1d(32, 16, kernel_size=kernel_size, stride=2, padding=padding, output_padding=1),
-            nn.ReLU(),
-            nn.ConvTranspose1d(16, 1, kernel_size=kernel_size, stride=1,  padding=(padding + padding_tuner), output_padding=0),
+            nn.LeakyReLU(),
+            nn.ConvTranspose1d(16, 1, kernel_size=kernel_size, stride=1,  padding=(padding + padding_tuner), output_padding=0)
         )
-
         # Initialize weights with He initialization
         self._apply_he_initialization()
 
