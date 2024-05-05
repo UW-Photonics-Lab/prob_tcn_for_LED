@@ -62,6 +62,24 @@ class SquareWaveGenerator(WaveformGenerator):
             p = q
 
         return self.amplitude * output + self.dc
+    
+class ArbitraryWaveGenerator(WaveformGenerator):
+    """
+    Generator for any waveform shape defined over a fundamental period of any length. 
+    """
+    def __init__(self, freq: float, dt: float, dc: float, arb_array: np.ndarray):
+        super(ArbitraryWaveGenerator, self).__init__(freq, dt)
+        self.arb_array = arb_array
+        self.dt = dt
+        self.freq = freq
+
+    def generate(self, duration: float):
+        t = self.get_time_array(duration)
+        samples = int(np.ceil(self.freq * duration * len(self.arb_array)))
+        freq_scaled_array = np.tile(self.arb_array, int(np.ceil(self.freq * duration)))[:samples]
+        times = np.linspace(0, t[len(t) - 1], len(freq_scaled_array))
+        interpolated_array = np.interp(t, times, freq_scaled_array)
+        return interpolated_array
 
 
 class NaiveRCCircuit:
