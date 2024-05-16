@@ -55,50 +55,47 @@ class CVAE(nn.Module):
                  feature_size, 
                  latent_size, 
                  condition_size=1, 
-                 hidden_size=100,
                  dropout_rate=0, 
                  kernel_size=5, 
                  padding = 2,
+                 channel_size = 8,# largest number of channels. Must be power of 2
                  padding_tuner = 0): #Used to tweak final output size (see final convoluation layer of decoder)
         super().__init__()
         self.feature_size = feature_size
         self.latent_size = latent_size
         self.condition_size = condition_size
+        self.channel_size = channel_size
+
 
         self.encoder_convolutional_layers = nn.Sequential(
-            nn.Conv1d(1, 16, kernel_size=kernel_size, stride=1, padding=padding),
+            nn.Conv1d(1, channel_size // 4, kernel_size=kernel_size, stride=1, padding=padding),
             nn.LeakyReLU(),
-            # nn.MaxPool1d(stride = 1, dilation=1, kernel_size=3, padding=1),
-
-            nn.Conv1d(16, 32, kernel_size=kernel_size, stride=2, padding=padding),
+            nn.Dropout(dropout_rate),
+            nn.Conv1d(channel_size // 4, channel_size // 2, kernel_size=kernel_size, stride=2, padding=padding),
             nn.LeakyReLU(),
-            # nn.MaxPool1d(stride = 1, dilation=1, kernel_size=3, padding=1),
-
-            nn.Conv1d(32, 64, kernel_size=kernel_size, stride=2, padding=padding), 
+            nn.Dropout(dropout_rate),
+            nn.Conv1d(channel_size // 2, channel_size, kernel_size=kernel_size, stride=2, padding=padding), 
             nn.LeakyReLU(),
-            # nn.MaxPool1d(stride = 1, dilation=1, kernel_size=3, padding=1),
-
+            nn.Dropout(dropout_rate),
             nn.Flatten(), # Flatten all channels
-            nn.Linear(64 * ((feature_size // 4) + 1), latent_size * 2) # Introduce two subarrays for mu and logvar
-        )
-        self.z_mu_layers = nn.Sequential(
-            nn.Linear(hidden_size, latent_size)
+            nn.Linear(channel_size * ((feature_size // 4) + 1), latent_size * 2) # Introduce two subarrays for mu and logvar
         )
 
-        self.z_var_layers = nn.Sequential(
-            nn.Linear(hidden_size, latent_size)
+        self.decoder_input = nn.Sequential(
+            nn.Linear(latent_size + condition_size, channel_size * ((feature_size // 4)))
         )
-
-        # Sets up correct dims for convolution
-        self.decoder_input = nn.Linear(latent_size + condition_size, 64 * ((feature_size // 4))) # Small clipping error
 
         self.decoder_convolutional_layers = nn.Sequential(
-            nn.ConvTranspose1d(64, 32, kernel_size=kernel_size, stride=2, padding=padding, output_padding=1),  
+            nn.ConvTranspose1d(channel_size, channel_size // 2, kernel_size=kernel_size, stride=2, padding=padding, output_padding=1),  
             nn.LeakyReLU(),
-            nn.ConvTranspose1d(32, 16, kernel_size=kernel_size, stride=2, padding=padding, output_padding=1),
+            nn.Dropout(dropout_rate),
+            nn.ConvTranspose1d(channel_size // 2, channel_size // 4, kernel_size=kernel_size, stride=2, padding=padding, output_padding=1),
             nn.LeakyReLU(),
-            nn.ConvTranspose1d(16, 1, kernel_size=kernel_size, stride=1,  padding=(padding + padding_tuner), output_padding=0)
+            nn.Dropout(dropout_rate),
+            nn.ConvTranspose1d(channel_size // 4, 1, kernel_size=kernel_size, stride=1,  padding=(padding + padding_tuner), output_padding=0),
+            nn.ReLU()
         )
+
         # Initialize weights with He initialization
         self._apply_he_initialization()
 
@@ -120,8 +117,8 @@ class CVAE(nn.Module):
     def decode(self, z, c): # P(x|z, c) probability distribution of x given latent z and condition c\
         z = torch.cat([z, c.unsqueeze(1)], dim=1)
         z = self.decoder_input(z)
-        # z = z.unsqueeze(1) # add single channel for convolution
-        z = z.view(z.size(0), 64, -1)
+        z = z.unsqueeze(1) # add single channel for convolution
+        z = z.view(z.size(0), self.channel_size, -1)
         z = self.decoder_convolutional_layers(z)
         return z
 
@@ -136,7 +133,7 @@ class CVAE(nn.Module):
         # Apply He initialization to fully connected and convolutional layers
         for m in self.modules():
             if isinstance(m, nn.Linear) or isinstance(m, nn.Conv1d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='leaky_relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
