@@ -4,3 +4,4 @@ scripts/__pycache__
 notebooks/*
 .vscode/*
 data/*
+models/*

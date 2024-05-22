@@ -55,14 +55,10 @@ class CVAE(nn.Module):
                  feature_size, 
                  latent_size, 
                  condition_size=1, 
-                 kernel_size_1=5,
-                 kernel_size_2=5, 
-                 kernel_size_3=5, 
-                 kernel_size_4=5,  
-                 padding_1 = 2,
-                 padding_2 = 2,
-                 channel_size = 8,# largest number of channels. Must be power of 2
-                 padding_tuner = 0): #Used to tweak final output size (see final convoluation layer of decoder)
+                 kernel_sizes = [],  
+                 use_max_pool = False,
+                 use_batch_norm = False,
+                 channel_size = 8): # Largest number of channels, must be power of 2
         super().__init__()
         self.feature_size = feature_size
         self.latent_size = latent_size
@@ -70,41 +66,50 @@ class CVAE(nn.Module):
         self.channel_size = channel_size
 
 
-        self.encoder_convolutional_layers = nn.Sequential(
-            nn.Conv1d(1, channel_size // 8, kernel_size=kernel_size_1, stride=1, padding=self._padding(kernel_size_1)),
-            # nn.BatchNorm1d(channel_size // 8),
-            nn.LeakyReLU(),
-            nn.Conv1d(channel_size // 8, channel_size // 4, kernel_size=kernel_size_2, stride=2, padding=self._padding(kernel_size_2)),
-            # nn.BatchNorm1d(channel_size // 4),
-            nn.LeakyReLU(),
-            nn.Conv1d(channel_size // 4, channel_size // 2, kernel_size=kernel_size_3, stride=2, padding=self._padding(kernel_size_3)),
-            # nn.BatchNorm1d(channel_size // 2), 
-            nn.LeakyReLU(),
-            nn.Conv1d(channel_size // 2, channel_size, kernel_size=kernel_size_4, stride=2, padding=self._padding(kernel_size_4)), 
-            # nn.BatchNorm1d(channel_size),
-            nn.LeakyReLU(),
-            nn.Flatten(), # Flatten all channels
-            nn.Linear(channel_size * ((feature_size // 8) + 1), latent_size * 2) # Introduce two subarrays for mu and logvar
-        )
+        encoder_layers = []
+        decoder_layers = []
 
-        self.decoder_input = nn.Sequential(
-            nn.Linear(latent_size + condition_size, channel_size * ((feature_size // 8)))
-        )
+        in_channels = 1
+        for i, kernel_size in enumerate(kernel_sizes):
+            out_channels = channel_size // (2 ** (i + 1))
+            encoder_layers.append(nn.Conv1d(in_channels, out_channels, kernel_size=kernel_size, stride=1, padding=self._padding(kernel_size)))
 
-        self.decoder_convolutional_layers = nn.Sequential(
-            nn.ConvTranspose1d(channel_size, channel_size // 2, kernel_size=kernel_size_4, stride=2, padding=self._padding(kernel_size_4), output_padding=1),  
-            # nn.BatchNorm1d(channel_size // 2),
-            nn.LeakyReLU(),
-            nn.ConvTranspose1d(channel_size // 2, channel_size // 4, kernel_size=kernel_size_3, stride=2, padding=self._padding(kernel_size_3), output_padding=1),
-            # nn.BatchNorm1d(channel_size // 4),
-            nn.LeakyReLU(),
-            nn.ConvTranspose1d(channel_size // 4, channel_size // 8, kernel_size=kernel_size_2, stride=2, padding=self._padding(kernel_size_2), output_padding=1),
-            # nn.BatchNorm1d(channel_size // 8),
-            nn.LeakyReLU(),
-            nn.ConvTranspose1d(channel_size // 8, 1, kernel_size=kernel_size_1, stride=1,  padding=(self._padding(kernel_size_1) + padding_tuner), output_padding=0),
-            # nn.BatchNorm1d(1),
-            nn.ReLU()
-        )
+            if use_batch_norm:
+                encoder_layers.append(nn.BatchNorm1d(out_channels))
+
+            encoder_layers.append(nn.LeakyReLU())
+
+            if use_max_pool:
+                encoder_layers.append(nn.MaxPool1d(kernel_size=kernel_size, stride=1, padding=self._padding(kernel_size)))
+
+            in_channels = out_channels
+        encoder_layers.append(nn.Flatten())
+        print("out", len(encoder_layers[-1]))
+        encoder_layers.append(nn.Linear(len(encoder_layers[-1]), latent_size * 2))
+        self.encoder_convolutional_layers = nn.Sequential(*encoder_layers)
+
+
+        self.dedecoder_input = nn.Linear(latent_size + condition_size, channel_size * ((feature_size // (2 ** len(kernel_sizes)))))
+        
+
+        in_channels = channel_size
+        for i, kernel_size in enumerate(kernel_sizes[::-1]):
+            out_channels = channel_size // (2 ** (len(kernel_sizes) - i))
+            decoder_layers.append(nn.ConvTranspose1d(in_channels, out_channels, kernel_size=kernel_size, stride=1, padding=self._padding(kernel_size)))
+
+            if use_batch_norm:
+                decoder_layers.append(nn.BatchNorm1d(out_channels))
+
+            decoder_layers.append(nn.LeakyReLU())
+
+            in_channels = out_channels
+
+        
+        # Set output to be strictly > 0
+        if use_batch_norm:
+            decoder_layers.append(nn.BatchNorm1d(1))
+        decoder_layers.append(nn.ReLU())
+        self.decoder_convolutional_layers = nn.Sequential(*decoder_layers)
 
         # Initialize weights with He initialization
         self._apply_he_initialization()
@@ -129,13 +134,20 @@ class CVAE(nn.Module):
         z = self.decoder_input(z)
         z = z.unsqueeze(1) # add single channel for convolution
         z = z.view(z.size(0), self.channel_size, -1)
+        for layer in self.decoder_convolutional_layers:
+            print("Layer type:", type(layer))
+            if isinstance(layer, nn.ConvTranspose1d):
+                print("Layer weight shape:", layer.weight.shape)
         z = self.decoder_convolutional_layers(z)
         return z
 
     def forward(self, x, c):
+        print("Input shape:", x.shape)
         mu, logvar = self.encode(x, c)
+        print("Encoder output shape:", mu.shape, logvar.shape)
         z = self.reparameterize(mu, logvar)
         x_predict = self.decode(z, c)
+        print("Decoder output shape:", x_predict.shape)
         x_predict = x_predict.squeeze(1) # remove single channel introduced for convolution
         return x_predict, mu, logvar
     
@@ -148,7 +160,7 @@ class CVAE(nn.Module):
                     nn.init.constant_(m.bias, 0)
 
 
-    def _calculate_convolution_transpose_size(self, input_size, stride, dilation, kernel_size, padding, output_padding) -> int:
+    def _calculate_convolution_transpose_size(self, input_size, kernel_size, stride=1, dilation=1, padding=1, output_padding=0) -> int:
         return (input_size - 1) * stride - 2 * padding + dilation * (kernel_size - 1) + output_padding + 1
     
     def _calculate_convolution_size(self, input_size, padding, dilation, kernel_size, stride) -> int:

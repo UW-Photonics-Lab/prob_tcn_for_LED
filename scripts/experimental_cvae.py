@@ -17,10 +17,6 @@ os.chdir(script_directory)
 
 from waveforms import *
 
-# Define sine score function to create training labels
-def sin_loss(arr: np.ndarray) -> float:
-    return np.sum(np.square(np.sin(((2 * np.pi) / len(arr)) * np.arange(len(arr))) - arr)) / 1e2
-
 # Define loss function that the decoder uses during training
 def loss_function(recon_x, x, mu, logvar):
     MSE = F.mse_loss(recon_x, x, reduction='sum')
@@ -28,13 +24,10 @@ def loss_function(recon_x, x, mu, logvar):
     return MSE + beta_factor * KLD
 
 # Define custom PyTorch compatable dataset
-class WaveformDataset(Dataset):
-    def __init__(self, waveform_list: list[np.ndarray], label_func, transform=None):
-        self.data = waveform_list
-        mean = np.mean(self.data)
-        std = np.std(self.data)
-        self.normalize_data = (self.data - mean) / std
-        self.labels = np.array([label_func(wave) for wave in self.data])
+class OptimizationDataset(Dataset):
+    def __init__(self, data, labels, transform=None):
+        self.data = data
+        self.labels = labels
         self.transform = transform
 
     def __getitem__(self, idx):
@@ -55,57 +48,54 @@ class CVAE(nn.Module):
                  feature_size, 
                  latent_size, 
                  condition_size=1, 
-                 kernel_size_1=5,
-                 kernel_size_2=5, 
-                 kernel_size_3=5, 
-                 kernel_size_4=5,  
-                 padding_1 = 2,
-                 padding_2 = 2,
-                 channel_size = 8,# largest number of channels. Must be power of 2
+                 hidden_size=100,
+                 dropout_rate=0, 
+                 kernel_size=5, 
+                 padding = 2,
                  padding_tuner = 0): #Used to tweak final output size (see final convoluation layer of decoder)
         super().__init__()
         self.feature_size = feature_size
         self.latent_size = latent_size
         self.condition_size = condition_size
-        self.channel_size = channel_size
-
 
         self.encoder_convolutional_layers = nn.Sequential(
-            nn.Conv1d(1, channel_size // 8, kernel_size=kernel_size_1, stride=1, padding=self._padding(kernel_size_1)),
-            # nn.BatchNorm1d(channel_size // 8),
+            nn.Conv1d(1, 16, kernel_size=kernel_size, stride=1, padding=padding),
+            nn.BatchNorm1d(16),
             nn.LeakyReLU(),
-            nn.Conv1d(channel_size // 8, channel_size // 4, kernel_size=kernel_size_2, stride=2, padding=self._padding(kernel_size_2)),
-            # nn.BatchNorm1d(channel_size // 4),
+            nn.Dropout(dropout_rate),
+            nn.Conv1d(16, 32, kernel_size=kernel_size, stride=2, padding=padding),
+            nn.BatchNorm1d(32),
             nn.LeakyReLU(),
-            nn.Conv1d(channel_size // 4, channel_size // 2, kernel_size=kernel_size_3, stride=2, padding=self._padding(kernel_size_3)),
-            # nn.BatchNorm1d(channel_size // 2), 
+            nn.Dropout(dropout_rate),
+            nn.Conv1d(32, 64, kernel_size=kernel_size, stride=2, padding=padding),
+            nn.BatchNorm1d(64),
             nn.LeakyReLU(),
-            nn.Conv1d(channel_size // 2, channel_size, kernel_size=kernel_size_4, stride=2, padding=self._padding(kernel_size_4)), 
-            # nn.BatchNorm1d(channel_size),
-            nn.LeakyReLU(),
+            nn.Dropout(dropout_rate),
             nn.Flatten(), # Flatten all channels
-            nn.Linear(channel_size * ((feature_size // 8) + 1), latent_size * 2) # Introduce two subarrays for mu and logvar
+            nn.Linear(64 * ((feature_size // 4) + 1), latent_size * 2) # Introduce two subarrays for mu and logvar
+        )
+        self.z_mu_layers = nn.Sequential(
+            nn.Linear(hidden_size, latent_size)
         )
 
-        self.decoder_input = nn.Sequential(
-            nn.Linear(latent_size + condition_size, channel_size * ((feature_size // 8)))
+        self.z_var_layers = nn.Sequential(
+            nn.Linear(hidden_size, latent_size)
         )
 
+        # Sets up correct dims for convolution
+        self.decoder_input = nn.Linear(latent_size + condition_size, 64 * ((feature_size // 4))) # Small clipping error
         self.decoder_convolutional_layers = nn.Sequential(
-            nn.ConvTranspose1d(channel_size, channel_size // 2, kernel_size=kernel_size_4, stride=2, padding=self._padding(kernel_size_4), output_padding=1),  
-            # nn.BatchNorm1d(channel_size // 2),
+            nn.ConvTranspose1d(64, 32, kernel_size=kernel_size, stride=2, padding=padding, output_padding=1),  
+            nn.BatchNorm1d(32),
             nn.LeakyReLU(),
-            nn.ConvTranspose1d(channel_size // 2, channel_size // 4, kernel_size=kernel_size_3, stride=2, padding=self._padding(kernel_size_3), output_padding=1),
-            # nn.BatchNorm1d(channel_size // 4),
+            nn.Dropout(dropout_rate),
+            nn.ConvTranspose1d(32, 16, kernel_size=kernel_size, stride=2, padding=padding, output_padding=1),
+            nn.BatchNorm1d(16),
             nn.LeakyReLU(),
-            nn.ConvTranspose1d(channel_size // 4, channel_size // 8, kernel_size=kernel_size_2, stride=2, padding=self._padding(kernel_size_2), output_padding=1),
-            # nn.BatchNorm1d(channel_size // 8),
-            nn.LeakyReLU(),
-            nn.ConvTranspose1d(channel_size // 8, 1, kernel_size=kernel_size_1, stride=1,  padding=(self._padding(kernel_size_1) + padding_tuner), output_padding=0),
-            # nn.BatchNorm1d(1),
+            nn.Dropout(dropout_rate),
+            nn.ConvTranspose1d(16, 1, kernel_size=kernel_size, stride=1, padding=(padding + padding_tuner), output_padding=0),
             nn.ReLU()
         )
-
         # Initialize weights with He initialization
         self._apply_he_initialization()
 
@@ -127,10 +117,10 @@ class CVAE(nn.Module):
     def decode(self, z, c): # P(x|z, c) probability distribution of x given latent z and condition c\
         z = torch.cat([z, c.unsqueeze(1)], dim=1)
         z = self.decoder_input(z)
-        z = z.unsqueeze(1) # add single channel for convolution
-        z = z.view(z.size(0), self.channel_size, -1)
+        z = z.view(z.size(0), 64, -1) # IMPORTANT: value here needs to change with updates to deconvolutional size
         z = self.decoder_convolutional_layers(z)
         return z
+
 
     def forward(self, x, c):
         mu, logvar = self.encode(x, c)
@@ -143,19 +133,16 @@ class CVAE(nn.Module):
         # Apply He initialization to fully connected and convolutional layers
         for m in self.modules():
             if isinstance(m, nn.Linear) or isinstance(m, nn.Conv1d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='leaky_relu')
+                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
 
-    def _calculate_convolution_transpose_size(self, input_size, stride, dilation, kernel_size, padding, output_padding) -> int:
+    def calculate_convolution_transpose_size(input_size, stride, dilation, kernel_size, padding, output_padding) -> int:
         return (input_size - 1) * stride - 2 * padding + dilation * (kernel_size - 1) + output_padding + 1
     
-    def _calculate_convolution_size(self, input_size, padding, dilation, kernel_size, stride) -> int:
+    def calculate_convolution_size(input_size, padding, dilation, kernel_size, stride) -> int:
         return np.floor(((input_size + 2 * padding - dilation * (kernel_size - 1) - 1) / stride) + 1)
-    
-    def _padding(self, kernel_size) -> int:
-        return (kernel_size - 1) // 2 
 
     
 # Defines train behavior 
