@@ -101,7 +101,6 @@ class CVAE(nn.Module):
         self.decoder_input = nn.Linear(latent_size + condition_size, current_size_decoder)
         current_size_decoder = current_size_decoder // channel_size
         in_channels = channel_size
-        output_padding = 1 # Default padding, but change for last layer to solve any clipping issues
         for i, kernel_size in enumerate(kernel_sizes[::-1]):
             current_size_decoder = self._calculate_convolution_transpose_size(current_size_decoder,
                                                                               kernel_size=kernel_size,
@@ -110,7 +109,6 @@ class CVAE(nn.Module):
                                                                               output_padding=1)
             if i == len(kernel_sizes) - 1:
                 out_channels = 1
-                output_padding = (feature_size - current_size_decoder) + 1
             else:
                 out_channels = max(channel_size //2 ** (i + 1) , 1)
             decoder_layers.append(nn.ConvTranspose1d(in_channels,
@@ -118,9 +116,8 @@ class CVAE(nn.Module):
                                                      kernel_size=kernel_size,
                                                      stride=self.stride,
                                                      padding=self._padding(kernel_size),
-                                                     output_padding=output_padding)) # Lout = 2 * Lin
+                                                     output_padding=1)) # Lout = 2 * Lin
         
-            
             if use_batch_norm:
                 decoder_layers.append(nn.BatchNorm1d(out_channels))
            
@@ -128,7 +125,10 @@ class CVAE(nn.Module):
 
             in_channels = out_channels
 
-        
+
+        output_padding = (feature_size - current_size_decoder)
+        decoder_layers.append(nn.ConstantPad1d((0, output_padding), 0)) # Pad output with zeros for clipping errors
+        print(output_padding, feature_size, current_size_decoder)
         self.decoder_convolutional_layers = nn.Sequential(*decoder_layers)
         self.decoder_convolutional_layers.append(nn.ReLU())
 
