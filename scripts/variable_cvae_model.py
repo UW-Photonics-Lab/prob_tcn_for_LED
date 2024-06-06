@@ -48,6 +48,19 @@ class WaveformDataset(Dataset):
         
     def __len__(self):
         return len(self.data)
+    
+# Custom padding module 
+class RepeatPad1d(nn.Module):
+    def __init__(self, output_padding):
+        super(RepeatPad1d, self).__init__()
+        self.output_padding = output_padding
+
+    def forward(self, x):
+        if self.output_padding > 0:
+            last_value = x[:, :, -1:]  # Get the last value along the sequence dimension
+            pad = last_value.expand(x.size(0), x.size(1), self.output_padding)  # Repeat the last value
+            x = torch.cat([x, pad], dim=2)  # Concatenate the original tensor with the padding
+        return x
 
 # Pytorch model definition. All Pytorch models must extend nn.Module
 class CVAE(nn.Module):
@@ -56,7 +69,6 @@ class CVAE(nn.Module):
                  latent_size, 
                  condition_size=1, 
                  kernel_sizes = [],  
-                 use_max_pool = False,
                  use_batch_norm = False,
                  stride = 2,
                  channel_size = 8): # Largest number of channels, must be power of 2
@@ -81,9 +93,6 @@ class CVAE(nn.Module):
                 encoder_layers.append(nn.BatchNorm1d(out_channels))
 
             encoder_layers.append(nn.LeakyReLU())
-
-            # if use_max_pool:
-            #     encoder_layers.append(nn.MaxPool1d(kernel_size=2, stride=1, padding=self._padding(2)))
 
             current_size = self._calculate_convolution_size(current_size, kernel_size=kernel_size, padding=self._padding(kernel_size), stride=self.stride)
 
@@ -127,8 +136,8 @@ class CVAE(nn.Module):
 
 
         output_padding = (feature_size - current_size_decoder)
-        decoder_layers.append(nn.ConstantPad1d((0, output_padding), 0)) # Pad output with zeros for clipping errors
-        print(output_padding, feature_size, current_size_decoder)
+
+        decoder_layers.append(RepeatPad1d(output_padding)) # Pad output with zeros for clipping errors
         self.decoder_convolutional_layers = nn.Sequential(*decoder_layers)
         self.decoder_convolutional_layers.append(nn.ReLU())
 
@@ -157,7 +166,6 @@ class CVAE(nn.Module):
         z = z.view(z.size(0), self.channel_size, -1)
         z = self.decoder_convolutional_layers(z)
         z = z.squeeze(1)
-        # z = self.decoder_output_layer(z)
         return z
 
     def forward(self, x, c):

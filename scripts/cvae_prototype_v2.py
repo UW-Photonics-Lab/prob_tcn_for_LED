@@ -21,11 +21,11 @@ from waveforms import *
 def sin_loss(arr: np.ndarray) -> float:
     return np.sum(np.square(np.sin(((2 * np.pi) / len(arr)) * np.arange(len(arr))) - arr)) / 1e2
 
-# Define loss function that the decoder uses during training
-def loss_function(recon_x, x, mu, logvar):
-    MSE = F.mse_loss(recon_x, x, reduction='sum')
-    KLD = -torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-    return MSE + beta_factor * KLD
+# # Define loss function that the decoder uses during training
+# def loss_function(recon_x, x, mu, logvar):
+#     MSE = F.mse_loss(recon_x, x, reduction='sum')
+#     KLD = -torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+#     return MSE + beta_factor * KLD
 
 # Define custom PyTorch compatable dataset
 class WaveformDataset(Dataset):
