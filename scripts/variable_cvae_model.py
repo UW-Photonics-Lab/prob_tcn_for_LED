@@ -45,11 +45,11 @@ class WaveformDataset(Dataset):
             sample_labels = self.transform(sample_labels)
 
         return sample_data, sample_labels
-        
+
     def __len__(self):
         return len(self.data)
-    
-# Custom padding module 
+
+# Custom padding module
 class RepeatPad1d(nn.Module):
     def __init__(self, output_padding):
         super(RepeatPad1d, self).__init__()
@@ -64,11 +64,11 @@ class RepeatPad1d(nn.Module):
 
 # Pytorch model definition. All Pytorch models must extend nn.Module
 class CVAE(nn.Module):
-    def __init__(self, 
-                 feature_size, 
-                 latent_size, 
-                 condition_size=1, 
-                 kernel_sizes = [],  
+    def __init__(self,
+                 feature_size,
+                 latent_size,
+                 condition_size=1,
+                 kernel_sizes = [],
                  use_batch_norm = False,
                  stride = 2,
                  channel_size = 8): # Largest number of channels, must be power of 2
@@ -86,7 +86,7 @@ class CVAE(nn.Module):
         in_channels = 1
         current_size = feature_size + 1 # variable keep track of current size (to solve mismatch with FCL layers)
         for i, kernel_size in enumerate(kernel_sizes):
-            out_channels = max(channel_size // (2 ** (len(kernel_sizes)  - i - 1)), 1) 
+            out_channels = max(channel_size // (2 ** (len(kernel_sizes)  - i - 1)), 1)
 
             encoder_layers.append(nn.Conv1d(in_channels, out_channels, kernel_size=kernel_size, stride=self.stride, padding=self._padding(kernel_size)))
             if use_batch_norm:
@@ -126,10 +126,10 @@ class CVAE(nn.Module):
                                                      stride=self.stride,
                                                      padding=self._padding(kernel_size),
                                                      output_padding=1)) # Lout = 2 * Lin
-        
+
             if use_batch_norm:
                 decoder_layers.append(nn.BatchNorm1d(out_channels))
-           
+
             decoder_layers.append(nn.LeakyReLU())
 
             in_channels = out_channels
@@ -158,7 +158,7 @@ class CVAE(nn.Module):
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mu + eps*std
-    
+
     def decode(self, z, c): # P(x|z, c) probability distribution of x given latent z and condition c\
         z = torch.cat([z, c.unsqueeze(1)], dim=1)
         z = self.decoder_input(z)
@@ -176,7 +176,7 @@ class CVAE(nn.Module):
         x_predict = self.decode(z, c)
         # print("Decoder output shape:", x_predict.shape)
         return x_predict, mu, logvar
-    
+
     def _apply_he_initialization(self):
         # Apply He initialization to fully connected and convolutional layers
         for m in self.modules():
@@ -188,17 +188,17 @@ class CVAE(nn.Module):
 
     def _calculate_convolution_transpose_size(self, input_size, kernel_size, stride=1, dilation=1, padding=1, output_padding=0) -> int:
         return int((input_size - 1) * stride - 2 * padding + dilation * (kernel_size - 1) + output_padding + 1)
-    
+
     def _calculate_convolution_size(self, input_size, padding, kernel_size, dilation=1, stride=1) -> int:
         x = input_size + (2 * padding) - dilation * (kernel_size - 1) - 1
         x = x / stride + 1
         return int(np.floor(x))
-    
-    def _padding(self, kernel_size) -> int:
-        return (kernel_size - 1) // 2 
 
-    
-# Defines train behavior 
+    def _padding(self, kernel_size) -> int:
+        return (kernel_size - 1) // 2
+
+
+# Defines train behavior
 def train(epoch, train_losses):
     model.train()
     train_loss = 0
@@ -224,8 +224,8 @@ def train(epoch, train_losses):
     train_losses.append(tot_train_loss)
     print('====> Epoch: {} Average loss: {:.4f}'.format(
         epoch, tot_train_loss))
-    
-# Defines test behavior 
+
+# Defines test behavior
 def test(epoch, test_losses):
     model.eval()
     test_loss = 0
@@ -236,11 +236,11 @@ def test(epoch, test_losses):
             test_loss += loss_function(recon_batch, data, mu, logvar).detach().cpu().numpy()
     test_loss /= len(test_loader.dataset)
     test_losses.append(test_loss)
-    print('====> Test set loss: {:.4f}'.format(test_loss))   
+    print('====> Test set loss: {:.4f}'.format(test_loss))
 
-# Pipeline
+# Example Pipeline (for reference only may not be fully up to date with rest of codebase)
 if __name__ == "__main__":
-    # Handy function that stops everything if numbers blow up or 
+    # Handy function that stops everything if numbers blow up or
     # become undefined
     torch.autograd.set_detect_anomaly(True)
 
@@ -252,7 +252,7 @@ if __name__ == "__main__":
         device = torch.device("cpu")
     print("Running on ", device)
 
-    # Import training waveforms 
+    # Import training waveforms
     wave_df = pd.read_csv("../data/training/prototype/non_sinusoid_waves.csv", index_col=0)
     waves = []
     for _, row in wave_df.iterrows():
