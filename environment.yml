@@ -11,3 +11,4 @@ dependencies:
   - pandas>=2.0
   - pytorch>=2.2.1
   - scikit-learn
+  - tqdm

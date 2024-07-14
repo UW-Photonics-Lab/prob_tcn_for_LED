@@ -1,3 +1,55 @@
+'''
+Authors: Dylan Jones
+
+DEPENDENCIES:
+    1. all_waves_f3dB_experiment.csv from Google Drive placed in a directory
+       /data/training/prototype/ created manually. All data files are not tracked by Git because
+       of memory constraints.
+
+    2. The optimization process takes an initially trained pickled model that must
+        be manually named and put into /models/pickled_models/current_best_model.pth.
+        This is to separate the models automatically created by initial training functionality,
+        so that one can only have desirable models in the optimization process
+
+    3. The optimization process automatically creates large plot folders to store
+       itemized results. You need to create a folder ./plots/optimization_plots
+       for the results to be stored (also not tracked by Git)
+
+This file achieves two goals:
+    1.  If train_initial is set to True, it can create a pickle file of a variable_cvae model to be used in
+        the optimization process. Think of this model as the "initial start" as the optimization process
+        will always start with this training state.
+
+    2. An optimization process whereby an initially trained model is put into an "experimental simulation"
+       where it takes an initial dataset (possibly all_waves_csv) and creates an new optimization_data_set.pkl
+       from the original training set. CRITICAL INFORMATION: this data set if undisturbed will accumulate
+       data from all previous optimization trials (analogous to real experiments) as the data is just a
+       mapping from waveform -> f3dB for the Naive circuit model and is thus agnostic to the model that
+       generated it.
+
+       The optimization process proceeds as follows (and has optimization hyperparameters):
+            1. Use existing optimization dataset or create new one based on original
+               training set if unavailable
+
+            2. Use the configured "prompt_f3dB" to generate waves hoping to
+                achieve such f3dB. The number of sample waves is configurable
+
+            3. Use the Naive circuit model to assign lables to all of these samples.
+               This is by far the slowest part of the code!
+
+            3. OPTIONAL: filter the new data to add the top X% performing samples
+
+            4. Concatenate new data to optimization_data_set
+
+            5. Performing a number of training/val epochs on new dataset
+
+            6. Create large amount of plots to track model performance. Then, set prompt
+               f3dB higher in hopes the model gradually learns higher performing mappings
+               between wave -> f3dB.
+
+            REPEAT AT STEP 2 UNTIL ALL CYCLES FINISHED (also configurable)
+'''
+
 import torch
 import random
 import sys
@@ -41,14 +93,14 @@ for _, row in voltages.iterrows():
 
 # 10% Test 10% Val 80% Train
 X_train, X_test, y_train, y_test = train_test_split(waves, labels, test_size=0.2, random_state=42)
-X_val, X_test, y_yal, y_test = train_test_split(X_test, y_test, test_size=0.2, random_state=42) 
+X_val, X_test, y_yal, y_test = train_test_split(X_test, y_test, test_size=0.2, random_state=42)
 print("Number of training points:", len(X_train))
 print("Test/Validation Size:", len(X_test))
 
-train_initial = False # Set true if you want to retrain model before optimization
+train_initial = True # Set true if you want to retrain model before optimization
 batch_size = 64
 latent_size = 71
-epochs = 20
+epochs = 1
 beta_factor = 0.1
 learning_rate = 0.003
 max_grad_norm = 1e3
@@ -77,10 +129,9 @@ class OptimizationDataset(Dataset):
     def add_data(self, new_data, new_labels):
         self.data = np.concatenate((self.data, new_data), axis=0)
         self.labels = np.concatenate((self.labels, new_labels), axis=0)
-        
+
     def __len__(self):
         return len(self.data)
-    
 
 train_data_set = OptimizationDataset(X_train, y_train, transform=lambda x: x.astype('float32'))
 train_loader = torch.utils.data.DataLoader(dataset=train_data_set, batch_size=batch_size, shuffle=True)
@@ -91,7 +142,7 @@ test_loader = torch.utils.data.DataLoader(dataset=test_data_set, batch_size=batc
 val_data_set = OptimizationDataset(X_val, y_yal, transform=lambda x: x.astype('float32'))
 val_loader = torch.utils.data.DataLoader(dataset=test_data_set, batch_size=batch_size, shuffle=True)
 
-model = CVAE(num_voltages, 
+model = CVAE(num_voltages,
              latent_size=latent_size,
              kernel_sizes=kernels,
              use_batch_norm=True,
@@ -101,20 +152,18 @@ optimizer = optim.Adam(model.parameters(), lr = learning_rate, weight_decay=1e-4
 # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min')
 scheduler = StepLR(optimizer, step_size=20, gamma=0.1)
 
-
-
 def loss_function(recon_x, x, mu, logvar):
         MSE = F.mse_loss(recon_x, x, reduction='sum')
         KLD = -torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
         return MSE + beta_factor * KLD
 
-# Handy function that stops everything if numbers blow up or 
+# Handy function that stops everything if numbers blow up or
 # become undefined
 torch.autograd.set_detect_anomaly(True)
-def train(epoch, 
-          train_losses, 
+def train(epoch,
+          train_losses,
           optimizer_reference,
-          loader_reference, 
+          loader_reference,
           model,
           make_plots=True, # Prints out reconstruction plots
           scheduler_reference=None):
@@ -143,7 +192,7 @@ def train(epoch,
 
         if scheduler_reference is not None:
             scheduler_reference.step()
-            
+
     tot_train_loss = train_loss / len(loader_reference.dataset)
     train_losses.append(tot_train_loss)
     print('====> Epoch: {} Average loss: {:.4f}'.format(
@@ -189,7 +238,7 @@ def val(epoch, val_losses, loader_reference, model):
             val_loss += loss_function(recon_batch, data, mu, logvar).detach().cpu().numpy()
     val_loss /= len(loader_reference.dataset)
     val_losses.append(val_loss)
-    print('====> Validation set loss: {:.4f}'.format(val_loss))        
+    print('====> Validation set loss: {:.4f}'.format(val_loss))
 
 
 def initial_training():
@@ -199,8 +248,17 @@ def initial_training():
                 train_losses = []
                 val_losses = []
                 for epoch in range(1, epochs + 1):
-                        train(epoch, train_losses)
-                        val(epoch, val_losses)
+                        train(epoch,
+                              train_losses=train_losses,
+                              model=model,
+                              optimizer_reference=optimizer,
+                              loader_reference=train_loader,
+                              make_plots=False,
+                              scheduler_reference=scheduler)
+                        val(epoch,
+                            model=model,
+                            loader_reference=val_loader,
+                            val_losses=val_losses)
                 plt.plot(train_losses, label = "Training Loss", color='purple')
                 plt.plot(val_losses, label = "Val Loss", color='gold')
                 plt.xlabel("Epochs")
@@ -229,7 +287,7 @@ def generate_new_samples(num_samples, condition, model) -> np.ndarray:
             sample = model.decode(sample, c).cpu().squeeze().flatten().numpy()
             new_samples.append(sample)
         return np.vstack(new_samples)
-    
+
 
 simple_rc_circuit = NaiveRCCircuit(c=1e-3, r0=1, alpha=3e3)
 
@@ -246,7 +304,7 @@ def create_labels(new_samples: np.ndarray, circuit_system) -> np.ndarray:
                                                 waveform_generator=arb_generator)
         output[i] = f3dB
 
-    return output 
+    return output
 
 
 if train_initial:
@@ -254,14 +312,19 @@ if train_initial:
     torch.save(model.state_dict(), '../models/pickled_models/most_recent_pickle.pth')
 
 
-pretrained_model = CVAE(num_voltages, 
+'-------------------------------- Optimization Process ----------------------------------------------'
+pretrained_model = CVAE(num_voltages,
              latent_size = latent_size,
              kernel_sizes=kernels,
              use_batch_norm=True,
              channel_size=max_channel_size).to(device)
 
 
-pretrained_model.load_state_dict(torch.load('../models/pickled_models/current_best_model.pth', map_location=torch.device(device)))
+try:
+    pretrained_model.load_state_dict(torch.load('../models/pickled_models/current_best_model.pth', map_location=torch.device(device)))
+except Exception as e:
+    print(f"Likely need to manually create current_best_model.pth by renaming a .pth pickle file. \n Exception: {e}")
+
 pretrained_optimizer = optim.Adam(pretrained_model.parameters(), lr = learning_rate, weight_decay=0)
 
 
@@ -278,7 +341,7 @@ subfolders = ['reconstructions',
               'train_val_loss',
               'generated_points_per_cycle',
               'all_points',
-              'f3db_diff_loss'] 
+              'f3db_diff_loss']
 
 # Create each subfolder
 for subfolder in subfolders:
@@ -332,7 +395,7 @@ for i in range(num_optimizations):
 
         new_data = top_x_percent_waveforms
         new_labels = top_x_percent_labels
-    
+
 
     # Add new data to the dataset and shuffle
     optimization_data_set.add_data(new_data, new_labels)
@@ -369,7 +432,7 @@ for i in range(num_optimizations):
                 except Exception as e:
                         attempt += 1
                         print(f"Attempt {attempt} failed with error: {e}")
-        
+
 
     # Collect prompted waves
     with torch.no_grad():
@@ -389,7 +452,7 @@ for i in range(num_optimizations):
                                             input_output_cycles=50,
                                             min_periods_to_equilibrium=20,
                                             waveform_generator=arb_generator)
-            
+
 
             avg = np.average(new_labels)
             actual_average_f3db = round(avg, 3) # Get average of all generated labels
@@ -408,7 +471,7 @@ for i in range(num_optimizations):
                     plt.savefig(f3d_diff_path)
                     plt.clf()
 
-                
+
                 generated_points_path = f'./plots/optimization_plots/{directory_name}/generated_points_per_cycle/generated_points_{prompt_f3db}f3dB.png'
                 plt.hist(new_labels, bins=100)
                 plt.title(f"{len(new_data)} Generated Points for f3dB {prompt_f3db} with Average {round(avg, 3)}")
