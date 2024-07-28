@@ -198,8 +198,6 @@ def train(epoch,
           scheduler_reference=scheduler,
           monitor_gradient_norms=monitor_gradients):
     
-    print("LR:", scheduler.get_last_lr()[0])
-    
     model.train()
     train_loss = 0
     for batch_idx, (data, labels) in enumerate(loader_reference):
@@ -308,6 +306,7 @@ def initial_training():
             print(f'Hyperparameters \n Train Initial: {train_initial} \n Batch Size: {batch_size}')
             print(f'Latent Size: {latent_size} \n Epochs: {epochs} \n Beta Factor: {beta_factor}')
             print(f'Learning Rate: {learning_rate} \n Max Grad Norm: {max_grad_norm}')
+            print(f"Initial Learning Rate: {initial_learning_rate} \n Initial Learning Rate Epochs {intial_lr_epochs}")
             print(f'Max Channel Size: {max_channel_size} \n Kernels: {kernels} \n Weight Decay: {weight_decay}')
             print("Model:")
             print(model)
