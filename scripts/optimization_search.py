@@ -175,8 +175,6 @@ optimizer = optim.Adam(model.parameters(), lr = learning_rate, weight_decay=weig
 def lr_lambda(epoch):
     if epoch < intial_lr_epochs:
         return initial_learning_rate / learning_rate
-    if epoch == initial_learning_rate:
-        print(f"Changed LR from {initial_learning_rate} to {learning_rate}")
     return 1
 
 
@@ -237,6 +235,8 @@ def train(epoch,
     # Update Scheduler at end of epoch
     if scheduler_reference is not None:
         scheduler_reference.step()
+        if epoch > intial_lr_epochs:
+            print(f"Changed LR from {initial_learning_rate} to {scheduler.get_last_lr()[0]}")
 
     tot_train_loss = train_loss / len(loader_reference.dataset)
     train_losses.append(tot_train_loss)
@@ -311,6 +311,7 @@ def initial_training():
             print("Model:")
             print(model)
 
+    print(f"Current learning rate: {scheduler.get_last_lr()[0]}")
     attempt = 0
     while attempt < 3: # Attempt more loops if initial training fails because of large loss in initial epochs
         try:
@@ -348,7 +349,7 @@ def initial_training():
                             plt.savefig(training_reconstruction_path)
                             plt.clf()
                         
-                            training_loss_path = f'./plots/training_plots/{directory_name}/training_and_val_loss/train_val_loss.png'
+                            training_loss_path = f'./plots/training_plots/{directory_name}/training_and_val_loss/train_val_loss{epoch}.png'
                             plt.plot(train_losses, label = "Training Loss", color='purple')
                             plt.plot(val_losses, label = "Val Loss", color='gold')
                             plt.xlabel("Epochs")
@@ -358,7 +359,7 @@ def initial_training():
                             plt.savefig(training_loss_path)
                             plt.clf()
 
-                            pruned_training_loss_path = f'./plots/training_plots/{directory_name}/training_and_val_loss/pruned_train_val_loss.png'
+                            pruned_training_loss_path = f'./plots/training_plots/{directory_name}/training_and_val_loss/pruned_train_val_loss{epoch}.png'
                             train_np_arr = np.array(train_losses)
                             train_np_arr = train_np_arr[train_np_arr < 100]
                             plt.plot(train_losses, label = "Training Losses Less than 100", color='purple')
