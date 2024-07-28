@@ -327,44 +327,44 @@ def initial_training():
                             model=model,
                             loader_reference=val_loader,
                             val_losses=val_losses)
-                with torch.no_grad():
-                    model.eval()
-                    # take a peek into reconstruction
-                    training_reconstruction_path = f'./plots/training_plots/{directory_name}/reconstructions/epoch{epoch}.png'
+                        with torch.no_grad():
+                            model.eval()
+                            # take a peek into reconstruction
+                            training_reconstruction_path = f'./plots/training_plots/{directory_name}/reconstructions/epoch{epoch}.png'
 
-                    # Get a random batch
-                    random_batch = next(iter(train_loader))
-                    data, labels = random_batch
-                    data, labels = data.to(device), labels.to(device)
-                    recon_batch, mu, logvar = model(data, labels)
-                    data = data.detach().cpu()[0]
-                    recon_batch= recon_batch.detach().cpu()[0]
-                    plt.plot(data, label='Original', color='purple')
-                    plt.plot(recon_batch, label='Reconstructed', color='gold')
-                    plt.title("Reconstruction by Decoder During Training")
-                    plt.xlabel("Time Step (arbitrary unit)")
-                    plt.ylabel("Voltage")
-                    plt.legend()
-                    plt.savefig(training_reconstruction_path)
-                    plt.clf()
-                
-                training_loss_path = f'./plots/training_plots/{directory_name}/training_and_val_loss/train_val_loss.png'
-                plt.plot(train_losses, label = "Training Loss", color='purple')
-                plt.plot(val_losses, label = "Val Loss", color='gold')
-                plt.xlabel("Epochs")
-                plt.ylabel("Loss")
-                plt.title("Training and Validation Loss vs Epochs")
-                plt.legend()
-                plt.savefig(training_loss_path)
-                plt.clf()
+                            # Get a random batch
+                            random_batch = next(iter(train_loader))
+                            data, labels = random_batch
+                            data, labels = data.to(device), labels.to(device)
+                            recon_batch, mu, logvar = model(data, labels)
+                            data = data.detach().cpu()[0]
+                            recon_batch= recon_batch.detach().cpu()[0]
+                            plt.plot(data, label='Original', color='purple')
+                            plt.plot(recon_batch, label='Reconstructed', color='gold')
+                            plt.title("Reconstruction by Decoder During Training")
+                            plt.xlabel("Time Step (arbitrary unit)")
+                            plt.ylabel("Voltage")
+                            plt.legend()
+                            plt.savefig(training_reconstruction_path)
+                            plt.clf()
+                        
+                            training_loss_path = f'./plots/training_plots/{directory_name}/training_and_val_loss/train_val_loss.png'
+                            plt.plot(train_losses, label = "Training Loss", color='purple')
+                            plt.plot(val_losses, label = "Val Loss", color='gold')
+                            plt.xlabel("Epochs")
+                            plt.ylabel("Loss")
+                            plt.title("Training and Validation Loss vs Epochs")
+                            plt.legend()
+                            plt.savefig(training_loss_path)
+                            plt.clf()
 
-                pruned_training_loss_path = f'./plots/training_plots/{directory_name}/training_and_val_loss/pruned_train_val_loss.png'
-                train_np_arr = np.array(train_losses)
-                train_np_arr = train_np_arr[train_np_arr < 100]
-                plt.plot(train_losses, label = "Training Losses Less than 100", color='purple')
-                plt.legend()
-                plt.savefig(pruned_training_loss_path)
-                plt.clf()
+                            pruned_training_loss_path = f'./plots/training_plots/{directory_name}/training_and_val_loss/pruned_train_val_loss.png'
+                            train_np_arr = np.array(train_losses)
+                            train_np_arr = train_np_arr[train_np_arr < 100]
+                            plt.plot(train_losses, label = "Training Losses Less than 100", color='purple')
+                            plt.legend()
+                            plt.savefig(pruned_training_loss_path)
+                            plt.clf()
 
                 return copy.deepcopy(model)
         except Exception as e:
