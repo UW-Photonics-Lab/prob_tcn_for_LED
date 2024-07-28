@@ -106,7 +106,7 @@ train_initial = True # Set true if you want to retrain model before optimization
 monitor_gradients = False # Set true if you want to monitor the magnitude of the L2 norm of the gradients
 batch_size = 64
 latent_size = 71
-epochs = 2
+epochs = 20
 beta_factor = 0.1
 weight_decay = 1e-4 # L2 regularization term
 learning_rate = 0.0003
@@ -494,6 +494,7 @@ with open(f'./plots/optimization_plots/{directory_name}/optimization_summary.txt
         print(f'Max Channel Size: {max_channel_size} \n Kernels: {kernels} \n Weight Decay: {weight_decay}')
         print(f'Num Optimizations: {num_optimizations} \n Samples per Optimization: {samples_per_opimization}')
         print(f'Epochs per Optimization: {epochs_per_optimization} \n Initial f3dB Prompt: {prompt_f3db} \n Prompt f3dB Step: {prompt_f3db}')
+        print(f"Take Top Percent: {take_x_top_percent}")
         print("Model:")
         print(pretrained_model)
 
