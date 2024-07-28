@@ -117,7 +117,7 @@ kernels = [151, 121, 35]
 
 # If you want an intially smaller learning rate to deal with large gradients at the beginning
 initial_learning_rate = learning_rate / 10
-intial_lr_epochs = 1 # How many epochs at initial LR
+initial_lr_epochs = 1 # How many epochs at initial LR
 '----------------------------------------------------------------------------------------------------------------------------'
 
 class OptimizationDataset(Dataset):
@@ -173,7 +173,7 @@ optimizer = optim.Adam(model.parameters(), lr = learning_rate, weight_decay=weig
 
 
 def lr_lambda(epoch):
-    if epoch < intial_lr_epochs:
+    if epoch < initial_lr_epochs:
         return initial_learning_rate / learning_rate
     return 1
 
@@ -235,7 +235,7 @@ def train(epoch,
     # Update Scheduler at end of epoch
     if scheduler_reference is not None:
         scheduler_reference.step()
-        if epoch > intial_lr_epochs:
+        if epoch == initial_lr_epochs:
             print(f"Changed LR from {initial_learning_rate} to {scheduler.get_last_lr()[0]}")
 
     tot_train_loss = train_loss / len(loader_reference.dataset)
@@ -306,7 +306,7 @@ def initial_training():
             print(f'Hyperparameters \n Train Initial: {train_initial} \n Batch Size: {batch_size}')
             print(f'Latent Size: {latent_size} \n Epochs: {epochs} \n Beta Factor: {beta_factor}')
             print(f'Learning Rate: {learning_rate} \n Max Grad Norm: {max_grad_norm}')
-            print(f"Initial Learning Rate: {initial_learning_rate} \n Initial Learning Rate Epochs {intial_lr_epochs}")
+            print(f"Initial Learning Rate: {initial_learning_rate} \n Initial Learning Rate Epochs {initial_lr_epochs}")
             print(f'Max Channel Size: {max_channel_size} \n Kernels: {kernels} \n Weight Decay: {weight_decay}')
             print("Model:")
             print(model)
