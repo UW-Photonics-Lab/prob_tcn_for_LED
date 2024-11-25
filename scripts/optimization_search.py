@@ -70,7 +70,7 @@ import torch.optim.lr_scheduler as lr_scheduler
 from datetime import datetime
 from contextlib import redirect_stdout
 from variable_cvae_model import CVAE
-from data_generator import *
+from modules.data_generator import *
 
 
 if (torch.cuda.is_available()):
@@ -195,7 +195,7 @@ def train(epoch,
           model,
           scheduler_reference=scheduler,
           monitor_gradient_norms=monitor_gradients):
-    
+
     model.train()
     train_loss = 0
     for batch_idx, (data, labels) in enumerate(loader_reference):
@@ -221,7 +221,7 @@ def train(epoch,
                 epoch, batch_idx * len(data), len(loader_reference.dataset),
                 100. * batch_idx / len(loader_reference),
                 loss.item() / len(data)))
-            
+
             if monitor_gradient_norms:
                 # Compute gradient norms
                 total_norm = 0
@@ -242,7 +242,7 @@ def train(epoch,
     train_losses.append(tot_train_loss)
     print('====> Epoch: {} Average loss: {:.4f}'.format(
           epoch, tot_train_loss))
-    
+
 
 def test(epoch, test_losses, loader_reference, model, printout=True):
     model.eval()
@@ -348,7 +348,7 @@ def initial_training():
                             plt.legend()
                             plt.savefig(training_reconstruction_path)
                             plt.clf()
-                        
+
                             training_loss_path = f'./plots/training_plots/{directory_name}/training_and_val_loss/train_val_loss{epoch}.png'
                             plt.plot(train_losses, label = "Training Loss", color='purple')
                             plt.plot(val_losses, label = "Val Loss", color='gold')
