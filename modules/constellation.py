@@ -4,14 +4,8 @@ This module aims to provide tools to be called in labview to generate a
 train of complex symbols to send through the AWG
 '''
 
-
-
 import numpy as np
 import matplotlib.pyplot as plt
-
-
-
-
 
 '''
 Helper functions
@@ -38,11 +32,10 @@ class ConstellationPlot:
         self._complex_symbols = complex_train
         self.bit_map = generate_bit_map(self._complex_symbols)
 
-
     def visualize(self):
-        reals = np.real(symbols)
-        imags = np.imag(symbols)
-        magnitudes = np.sqrt(np.real(symbols.conj() * symbols))
+        reals = np.real(self._complex_symbols)
+        imags = np.imag(self._complex_symbols)
+        magnitudes = np.sqrt(np.real(self._complex_symbols.conj() *  self._complex_symbols))
         max_mag = np.max(magnitudes)
 
         plt.figure(figsize=(4, 4))
@@ -60,13 +53,33 @@ class ConstellationPlot:
         plt.show()
 
     def create_training_data_Ts(self, num_symbols, random=True):
-        bit_array = np.array(list(self.bit_map.values()))
+        bit_strings = np.array(list(self.bit_map.values()))
         if random:
             random_indices = np.random.choice(
                 len(self._complex_symbols), size=num_symbols)
             random_symbols = self._complex_symbols[random_indices]
             print(random_indices)
-            random_bits = bit_array[random_indices]
+            random_bits = bit_strings[random_indices]
             return random_symbols, random_bits
         else:
-            return np.resize(self._complex_symbols, num_symbols), np.resize(bit_array, num_symbols)
+            return np.resize(self._complex_symbols, num_symbols), np.resize(bit_strings, num_symbols)
+        
+
+'''
+Functions that can be called in LabView
+'''
+
+def generate_qpsk_training_data(num_symbols: int, random: bool=False) -> tuple[np.array, np.array, list[str]]:
+    '''
+    Returns a tuple with (real, imag, associated_bits)
+    '''
+    qpsk_symbols = np.array([1 + 1j, 1 - 1j, -1 + 1j, -1 - 1j])
+    qpsk_const = ConstellationPlot(qpsk_symbols)
+    complex_symbols, bits = qpsk_const.create_training_data_Ts(num_symbols, random)
+    real_parts = complex_symbols.real
+    imag_parts = complex_symbols.imag
+    # LabView doesn't support non-contiguous arrays
+    real_parts = np.ascontiguousarray(real_parts)
+    imag_parts = np.ascontiguousarray(imag_parts)
+    bits = [str(b) for b in bits]
+    return real_parts, imag_parts, bits
