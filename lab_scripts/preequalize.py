@@ -16,6 +16,9 @@ def apply_pre_equalization(wave_form: tuple[list, list]) -> tuple[list, list]:
 def apply_linear_pre_distortion(wave_form: list, check_domain: bool) -> tuple[list, list]:
     voltages = np.array(wave_form)
 
+    damage_max = 10
+    damage_min = 0
+
     # Check domain
     max_linear_voltage = 5.896
     min_linear_voltage = 2.933
@@ -45,8 +48,15 @@ def apply_linear_pre_distortion(wave_form: list, check_domain: bool) -> tuple[li
 
     f_i_numpy = np.poly1d(list(f_i_coeffs.values()))
 
-    f_i = lambda i: f_i_numpy(i).astype(float).tolist()
+    f_i = lambda i: f_i_numpy(i).astype(float)
+    shifted_voltages = f_i(linear_map(voltages))
 
-    shifted_voltages = list(f_i(linear_map(voltages)))
-    return shifted_voltages
+        # Check if clipping will occur
+    if np.any(shifted_voltages > damage_max) or np.any(shifted_voltages < damage_min):
+        print(f"Warning: Some voltages were clipped to stay within [{damage_min}, {damage_max}]V")
+    
+    safe_voltages = np.clip(shifted_voltages, damage_min, damage_max)
+
+    safe_voltages = list(shifted_voltages)
+    return safe_voltages
     
