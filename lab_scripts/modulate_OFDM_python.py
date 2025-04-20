@@ -35,16 +35,26 @@ def modulate_data_OFDM(mode: str, num_carriers: int, data: list[int]) -> tuple[l
         constellation = QPSK_Constellation()
     
     encoded_symbols = constellation.bits_to_symbols(bits)
-
+    true_bits = np.array(data)
+    
     # Reshape such that each row is a frame to be transmitted
     if len(encoded_symbols) % N_data != 0:
         # Padd for full frame
         zeros_to_add = N_data - len(encoded_symbols) % N_data
+        bits_added = constellation.symbols_to_bits(np.zeros(zeros_to_add))
         encoded_symbols = np.hstack((encoded_symbols, np.zeros(zeros_to_add)))
+        true_bits = np.hstack((true_bits, bits_added))
 
     encoded_symbol_frames = encoded_symbols.reshape(-1, N_data)
     encoded_symbol_frames_real = encoded_symbol_frames.real.copy()
     encoded_symbol_frames_imag = encoded_symbol_frames.imag.copy()
 
+
+    # Reshape true bits by frame
+    number_of_frames, _ = encoded_symbol_frames.shape
+    grouped_true_bits = true_bits.reshape(number_of_frames, -1)
+
+    grouped_true_bits_list = [[str(element) for element in row] for row in grouped_true_bits.tolist()]
+
     # Return as real and imaginary parts
-    return encoded_symbol_frames_real, encoded_symbol_frames_imag
+    return encoded_symbol_frames_real, encoded_symbol_frames_imag, grouped_true_bits_list
