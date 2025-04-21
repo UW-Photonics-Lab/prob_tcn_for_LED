@@ -36,13 +36,14 @@ def modulate_data_OFDM(mode: str, num_carriers: int, data: list[int]) -> tuple[l
     
     encoded_symbols = constellation.bits_to_symbols(bits)
     true_bits = np.array(data)
-    
+
     # Reshape such that each row is a frame to be transmitted
     if len(encoded_symbols) % N_data != 0:
         # Padd for full frame
         zeros_to_add = N_data - len(encoded_symbols) % N_data
-        bits_added = constellation.symbols_to_bits(np.zeros(zeros_to_add))
-        encoded_symbols = np.hstack((encoded_symbols, np.zeros(zeros_to_add)))
+        padding_symbols = np.repeat(constellation.bits_to_symbols("00"), zeros_to_add)
+        bits_added = np.array(list(constellation.symbols_to_bits(padding_symbols)))
+        encoded_symbols = np.hstack((encoded_symbols, padding_symbols))
         true_bits = np.hstack((true_bits, bits_added))
 
     encoded_symbol_frames = encoded_symbols.reshape(-1, N_data)

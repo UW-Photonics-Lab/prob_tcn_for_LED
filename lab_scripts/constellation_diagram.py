@@ -52,6 +52,9 @@ class QPSK_Constellation(ConstellationDiagram):
     
     def bits_to_symbols(self, bits: str) -> np.array:
         # Group strings into size by modulation order
+        if len(bits) % 2 != 0:
+            # Padd by a zero
+            bits = bits + "0"
         grouped_bits = [bits[x : x + self.modulation_order] for x in range(0, len(bits), self.modulation_order)]
         bits_to_symbol_map = {v : k for k, v in self._symbols_to_bits_map.items()}
         symbols = np.array([bits_to_symbol_map[group] for group in grouped_bits])
