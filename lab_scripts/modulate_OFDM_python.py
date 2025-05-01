@@ -11,6 +11,11 @@ from scipy import signal
 from scipy.signal import find_peaks
 import os
 
+# Get logging
+from lab_scripts.logging_code import *
+
+decode_logger = setup_logger(log_file=r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\decode_bits_log.txt")
+
 def modulate_data_OFDM(mode: str, 
                        num_carriers: int, 
                        data: list[int], 
@@ -34,20 +39,25 @@ def modulate_data_OFDM(mode: str,
     '''
     bits = "".join([str(x) for x in data])
 
-    # Calculate the maximum number of frequency carriers
-    N_max = int((np.floor(f_max / subcarrier_delta_f) + 1) * 2)
+    # # Calculate the maximum number of frequency carriers
+    # N_max = int((np.floor(f_max / subcarrier_delta_f) + 1) * 2)
 
-    # Set all carriers below f_min to zero
-    k_min = int(np.ceil(f_min / subcarrier_delta_f)) - 1
+    # # Set all carriers below f_min to zero
+    # k_min = int(np.ceil(f_min / subcarrier_delta_f)) - 1
 
-    # Calculate amount that can actually carry data
-    N_data = int(N_max // 2) - k_min - 1
+    # # Calculate amount that can actually carry data
+    # N_data = int(N_max // 2) - k_min - 1
+
+    k_min = int(np.floor(f_min / subcarrier_delta_f))
+
+    N_data = int(np.floor(f_max / subcarrier_delta_f) - k_min)
     
     # Grab constellation object
     if mode == "qpsk":
         constellation = QPSK_Constellation()
     
     encoded_symbols = constellation.bits_to_symbols(bits)
+    decode_logger.debug(f"Encoded symbols: {encoded_symbols}")
     true_bits = np.array(data)
 
 
@@ -65,7 +75,7 @@ def modulate_data_OFDM(mode: str,
     encoded_symbol_frames = encoded_symbols.reshape(-1, frame_length)
 
     # Add zeros on front equal to k_min 
-    encoded_symbols = np.hstack((np.zeros(k_min), encoded_symbols))
+    encoded_symbol_frames = np.hstack((np.zeros((encoded_symbol_frames.shape[0], k_min)), encoded_symbol_frames))
     encoded_symbol_frames_real = encoded_symbol_frames.real.copy()
     encoded_symbol_frames_imag = encoded_symbol_frames.imag.copy()
 
@@ -143,14 +153,18 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
     plot_file = os.path.join(log_dir, 'demodulation_plots.png')
 
 
-    # Set all carriers below f_min to zero
-    k_min = int(np.ceil(f_min / subcarrier_delta_f)) - 1 
+    # # Set all carriers below f_min to zero
+    # k_min = int(np.ceil(f_min / subcarrier_delta_f)) - 1 
 
-    # Calculate the maximum number of frequency carriers
-    N_max = int((np.floor(f_max / subcarrier_delta_f) + 1) * 2)
+    # # Calculate the maximum number of frequency carriers
+    # N_max = int((np.floor(f_max / subcarrier_delta_f) + 1) * 2)
 
-    # Calculate amount that can actually carry data
-    N_data = int(N_max // 2) - k_min - 1 
+    # # Calculate amount that can actually carry data
+    # N_data = int(N_max // 2) - k_min - 1 
+
+    k_min = int(np.floor(f_min / subcarrier_delta_f))
+
+    N_data = int(np.floor(f_max / subcarrier_delta_f) - k_min)
 
     # Open log file for writing
     with open(log_file, 'w') as log:
@@ -237,7 +251,7 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
             raise ValueError("No valid frames detected")
         
 
-        log.write(f"Number of frames extracted: {len(frames)}\n")
+        decode_logger.debug(f"Number of frames extracted: {len(frames)}\n")
 
         frame_y_t = frames[0]
 
@@ -249,30 +263,39 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
 
             # Calculate the frequency axis
             fft_length = len(Y_s)
-            freq_axis = np.fft.fftfreq(fft_length, d=time_OFDM_frame / ofdm_payload_length)  # Frequency values in Hz
-            positive_freqs = freq_axis[1:fft_length // 2]  # Only positive frequencies
+            # freq_axis = np.fft.fftfreq(fft_length, d=time_OFDM_frame / ofdm_payload_length)  # Frequency values in Hz
+            # positive_freqs = freq_axis[1:fft_length // 2]  # Only positive frequencies
 
             # Limit the plot to the highest subcarrier frequency
-            max_freq = f_max * 1.2
-            freq_mask = positive_freqs <= max_freq
-            limited_freqs = positive_freqs[freq_mask]
-            limited_magnitude = np.abs(Y_s[1:fft_length // 2])[freq_mask]
+            # max_freq = f_max
+            # freq_mask = positive_freqs <= max_freq
+            # limited_freqs = positive_freqs[freq_mask]
+            # limited_magnitude = np.abs(Y_s[1:fft_length // 2])[freq_mask]
+            limited_magnitude = np.abs(Y_s)
 
             # Plot the FFT magnitude
-            plt.plot(limited_freqs, limited_magnitude)
+            plt.plot(limited_magnitude)
             plt.title('FFT Magnitude')
             plt.xlabel('Frequency (Hz)')
             plt.ylabel('Magnitude')
 
         # Extract both positive and negative frequency carriers
         num_data_carriers = N_data
-        positive_carriers = Y_s[k_min + 1 :num_data_carriers + k_min + 1]
-        negative_carriers = Y_s[-num_data_carriers:]
-        data_subcarriers = positive_carriers
+        negative_carriers = Y_s[k_min + 1:num_data_carriers + k_min + 1]
+        positive_carriers = Y_s[-num_data_carriers -k_min - 1: -k_min -1]
+        data_subcarriers = negative_carriers
         data_subcarriers = data_subcarriers * (np.max(np.abs(constellation._complex_symbols)) / np.max(np.abs(data_subcarriers)))
+        decode_logger.debug(f"Received Positive Carriers: {data_subcarriers}")
 
-        log.write(f"Data subcarriers (real): {data_subcarriers.real.tolist()}\n")
-        log.write(f"Data subcarriers (imag): {data_subcarriers.imag.tolist()}\n")
+        negative_carriers_t = Y_s[:2 * num_data_carriers]
+        positive_carriers_t = Y_s[-2 * num_data_carriers:]
+
+        negative_carriers_t = negative_carriers_t * (np.max(np.abs(constellation._complex_symbols)) / np.max(np.abs(negative_carriers_t)))
+        positive_carriers_t = positive_carriers_t * (np.max(np.abs(constellation._complex_symbols)) / np.max(np.abs(positive_carriers_t)))
+
+        decode_logger.debug(f"Y pos: {positive_carriers_t}\n")
+        decode_logger.debug(f"Y neg: {negative_carriers_t}\n")
+
 
         if debug_plots:
             # Plot 6: Constellation Diagram
@@ -339,6 +362,8 @@ def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,
     min_len = min(len(true_bits_array), len(decided_bits_flat_array))
     true_bits_array = true_bits_array[:min_len]
     decided_bits_flat_array = decided_bits_flat_array[:min_len]
+
+    decode_logger.debug(f"True bit array: \n {true_bits_array} \n Decided bits array: \n {decided_bits_flat_array}")
 
     # Calculate BER
     BER = float(np.sum(true_bits_array != decided_bits_flat_array) / len(true_bits_array))
