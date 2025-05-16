@@ -6,3 +6,5 @@ notebooks/*
 data/*
 models/*
 debug_logs/*
+experiments/*
+*.pyc 

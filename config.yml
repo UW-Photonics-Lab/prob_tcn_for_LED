@@ -1,0 +1,8 @@
+plot_every: 200
+num_epochs: 2000
+lr: 1e-4
+nhead: 4
+nlayers: 2
+dim_feedforward: 32
+batch_size: 64
+dropout: 0.1

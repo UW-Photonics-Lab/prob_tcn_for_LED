@@ -91,7 +91,9 @@ def modulate_data_OFDM(mode: str,
 
 
 AWG_MEMORY_LENGTH = 16384
-BARKER_LENGTH = int(0.01 * (AWG_MEMORY_LENGTH))
+# AWG_MEMORY_LENGTH = 105
+
+BARKER_LENGTH = int(0.01 * (AWG_MEMORY_LENGTH)) if int(0.01 * (AWG_MEMORY_LENGTH)) > 5 else 5
 def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: list[list[float]], cyclic_prefix_length: int) -> list[float]:
     '''Takes a symbol frame matrix and converts and x(t) frame matrix
 
@@ -104,7 +106,7 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
 
     '''
     symbol_groups = np.array(real_symbol_groups) + np.array(imag_symbol_groups) * 1j
-    barker_code = np.array([1, 1, -1, -1, 1, 1, -1, -1, 1, 1], dtype=float)
+    barker_code = np.array([1, -1, 1, -1, 1], dtype=float)
     barker_code = np.repeat(barker_code, BARKER_LENGTH // len(barker_code)) # Set as 1%
     IFFT_LENGTH = int(AWG_MEMORY_LENGTH - len(barker_code))
 
