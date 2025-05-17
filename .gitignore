@@ -8,3 +8,5 @@ models/*
 debug_logs/*
 experiments/*
 *.pyc 
+wandb*
+saved_models/*

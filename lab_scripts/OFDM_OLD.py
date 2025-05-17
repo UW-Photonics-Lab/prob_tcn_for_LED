@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from constellation import ConstellationPlot
+from lab_scripts.constellation_OLD import ConstellationPlot
 from scipy.signal import resample_poly
 from scipy import signal
 from scipy.signal import find_peaks
