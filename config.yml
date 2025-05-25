@@ -1,0 +1,7 @@
+lr: 1e-4
+nhead: 4
+nlayers: 2
+dim_feedforward: 32
+batch_size: 1
+dropout: 0.1
+d_model: 32

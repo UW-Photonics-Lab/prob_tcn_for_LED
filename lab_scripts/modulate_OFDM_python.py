@@ -10,6 +10,13 @@ from scipy.signal import resample_poly
 from scipy import signal
 from scipy.signal import find_peaks
 import os
+from training_state import STATE
+import torch
+
+# Get logging
+from lab_scripts.logging_code import *
+
+decode_logger = setup_logger(log_file=r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\decode_bits_log.txt")
 
 def modulate_data_OFDM(mode: str, 
                        num_carriers: int, 
@@ -34,20 +41,16 @@ def modulate_data_OFDM(mode: str,
     '''
     bits = "".join([str(x) for x in data])
 
-    # Calculate the maximum number of frequency carriers
-    N_max = int((np.floor(f_max / subcarrier_delta_f) + 1) * 2)
+    k_min = int(np.floor(f_min / subcarrier_delta_f))
 
-    # Set all carriers below f_min to zero
-    k_min = int(np.ceil(f_min / subcarrier_delta_f)) - 1
-
-    # Calculate amount that can actually carry data
-    N_data = int(N_max // 2) - k_min - 1
+    N_data = int(np.floor(f_max / subcarrier_delta_f) - k_min)
     
     # Grab constellation object
     if mode == "qpsk":
         constellation = QPSK_Constellation()
     
     encoded_symbols = constellation.bits_to_symbols(bits)
+    # decode_logger.debug(f"Encoded symbols: {encoded_symbols}")
     true_bits = np.array(data)
 
 
@@ -65,7 +68,7 @@ def modulate_data_OFDM(mode: str,
     encoded_symbol_frames = encoded_symbols.reshape(-1, frame_length)
 
     # Add zeros on front equal to k_min 
-    encoded_symbols = np.hstack((np.zeros(k_min), encoded_symbols))
+    encoded_symbol_frames = np.hstack((np.zeros((encoded_symbol_frames.shape[0], k_min)), encoded_symbol_frames))
     encoded_symbol_frames_real = encoded_symbol_frames.real.copy()
     encoded_symbol_frames_imag = encoded_symbol_frames.imag.copy()
 
@@ -81,7 +84,9 @@ def modulate_data_OFDM(mode: str,
 
 
 AWG_MEMORY_LENGTH = 16384
-BARKER_LENGTH = int(0.01 * (AWG_MEMORY_LENGTH))
+# AWG_MEMORY_LENGTH = 105
+
+BARKER_LENGTH = int(0.01 * (AWG_MEMORY_LENGTH)) if int(0.01 * (AWG_MEMORY_LENGTH)) > 5 else 5
 def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: list[list[float]], cyclic_prefix_length: int) -> list[float]:
     '''Takes a symbol frame matrix and converts and x(t) frame matrix
 
@@ -94,7 +99,7 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
 
     '''
     symbol_groups = np.array(real_symbol_groups) + np.array(imag_symbol_groups) * 1j
-    barker_code = np.array([1, 1, -1, -1, 1, 1, -1, -1, 1, 1], dtype=float)
+    barker_code = np.array([1, -1, 1, -1, 1], dtype=float)
     barker_code = np.repeat(barker_code, BARKER_LENGTH // len(barker_code)) # Set as 1%
     IFFT_LENGTH = int(AWG_MEMORY_LENGTH - len(barker_code))
 
@@ -134,7 +139,7 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
                                      subcarrier_delta_f: float) -> list:
     '''Converts received y(t) into a bit string with optional debugging plots'''
 
-    debug_plots = True
+    debug_plots = False
 
      # Define paths for saving logs and plots
     log_dir = r'C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs'
@@ -142,15 +147,9 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
     log_file = os.path.join(log_dir, 'demodulation_log.txt')
     plot_file = os.path.join(log_dir, 'demodulation_plots.png')
 
+    k_min = int(np.floor(f_min / subcarrier_delta_f))
 
-    # Set all carriers below f_min to zero
-    k_min = int(np.ceil(f_min / subcarrier_delta_f)) - 1 
-
-    # Calculate the maximum number of frequency carriers
-    N_max = int((np.floor(f_max / subcarrier_delta_f) + 1) * 2)
-
-    # Calculate amount that can actually carry data
-    N_data = int(N_max // 2) - k_min - 1 
+    N_data = int(np.floor(f_max / subcarrier_delta_f) - k_min)
 
     # Open log file for writing
     with open(log_file, 'w') as log:
@@ -237,7 +236,7 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
             raise ValueError("No valid frames detected")
         
 
-        log.write(f"Number of frames extracted: {len(frames)}\n")
+        # decode_logger.debug(f"Number of frames extracted: {len(frames)}\n")
 
         frame_y_t = frames[0]
 
@@ -246,33 +245,31 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
 
         if debug_plots:
             plt.subplot(325)
-
-            # Calculate the frequency axis
-            fft_length = len(Y_s)
-            freq_axis = np.fft.fftfreq(fft_length, d=time_OFDM_frame / ofdm_payload_length)  # Frequency values in Hz
-            positive_freqs = freq_axis[1:fft_length // 2]  # Only positive frequencies
-
-            # Limit the plot to the highest subcarrier frequency
-            max_freq = f_max * 1.2
-            freq_mask = positive_freqs <= max_freq
-            limited_freqs = positive_freqs[freq_mask]
-            limited_magnitude = np.abs(Y_s[1:fft_length // 2])[freq_mask]
+            limited_magnitude = np.abs(Y_s)
 
             # Plot the FFT magnitude
-            plt.plot(limited_freqs, limited_magnitude)
+            plt.plot(limited_magnitude)
             plt.title('FFT Magnitude')
             plt.xlabel('Frequency (Hz)')
             plt.ylabel('Magnitude')
 
         # Extract both positive and negative frequency carriers
         num_data_carriers = N_data
-        positive_carriers = Y_s[k_min + 1 :num_data_carriers + k_min + 1]
-        negative_carriers = Y_s[-num_data_carriers:]
-        data_subcarriers = positive_carriers
+        negative_carriers = Y_s[k_min + 1:num_data_carriers + k_min + 1]
+        positive_carriers = Y_s[-num_data_carriers -k_min - 1: -k_min -1]
+        data_subcarriers = negative_carriers
         data_subcarriers = data_subcarriers * (np.max(np.abs(constellation._complex_symbols)) / np.max(np.abs(data_subcarriers)))
+        # decode_logger.debug(f"Received Positive Carriers: {data_subcarriers}")
 
-        log.write(f"Data subcarriers (real): {data_subcarriers.real.tolist()}\n")
-        log.write(f"Data subcarriers (imag): {data_subcarriers.imag.tolist()}\n")
+        negative_carriers_t = Y_s[:2 * num_data_carriers]
+        positive_carriers_t = Y_s[-2 * num_data_carriers:]
+
+        negative_carriers_t = negative_carriers_t * (np.max(np.abs(constellation._complex_symbols)) / np.max(np.abs(negative_carriers_t)))
+        positive_carriers_t = positive_carriers_t * (np.max(np.abs(constellation._complex_symbols)) / np.max(np.abs(positive_carriers_t)))
+
+        # decode_logger.debug(f"Y pos: {positive_carriers_t}\n")
+        # decode_logger.debug(f"Y neg: {negative_carriers_t}\n")
+
 
         if debug_plots:
             # Plot 6: Constellation Diagram
@@ -307,22 +304,43 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
     return data_subcarriers.real.tolist(), data_subcarriers.imag.tolist()
 
 
+from encoder_decoder import update_weights
 def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,  mode: str) -> list:
     # Create constellation for demodulation
 
 
-    symbols = np.array(real_symbols) + 1j * np.array(imag_symbols)
+    symbols = torch.tensor(real_symbols) + 1j * torch.tensor(imag_symbols)
+
+    # Instead of grabbing from labview, directly take from decoder
+    if 'encoder_out' in STATE:
+        if STATE['encoder_out'] is not None:
+            symbols = STATE['encoder_out']
+
+
     # Grab constellation object
     if mode == "qpsk":
         constellation = QPSK_Constellation()
 
-    symbols = np.array(symbols)
+    # symbols = np.array(symbols)
     # Demap symbols to bits
-    constellation_symbols = np.array(list(constellation._symbols_to_bits_map.keys()))
+    constellation_symbols = torch.tensor(
+        list(constellation._symbols_to_bits_map.keys()),
+        dtype=symbols.dtype,
+        device=symbols.device
+    )
     distances = abs(symbols.reshape(-1, 1) - constellation_symbols.reshape(1, -1))
+
+    # Calculate EVM for backprop loss
+    EVM = torch.mean(torch.square(distances))
+
+    # Call backprop and log loss
+    if 'encoder_out' in STATE and 'decoder_out' in STATE:
+        update_weights(EVM)
+
     closest_idx = distances.argmin(axis=1)
     decisions = constellation_symbols[closest_idx]
-    decided_bits = [constellation._symbols_to_bits_map[symbol] for symbol in decisions]
+    decided_bits = [constellation._symbols_to_bits_map[complex(symbol.real.item(), symbol.imag.item())] 
+                    for symbol in decisions]
 
 
     # Flatten decided bits into a 1D array
@@ -340,7 +358,13 @@ def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,
     true_bits_array = true_bits_array[:min_len]
     decided_bits_flat_array = decided_bits_flat_array[:min_len]
 
+    # decode_logger.debug(f"True bit array: \n {true_bits_array} \n Decided bits array: \n {decided_bits_flat_array}")
+
     # Calculate BER
     BER = float(np.sum(true_bits_array != decided_bits_flat_array) / len(true_bits_array))
+
+    # 
+
+
     SNR, PowerFactor = float(0), float(0) 
     return decided_bits_flat, float(BER), SNR, PowerFactor
