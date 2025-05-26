@@ -1,7 +1,9 @@
-lr: 1e-4
+lr: 1e-3
 nhead: 4
-nlayers: 2
-dim_feedforward: 32
-batch_size: 1
-dropout: 0.1
-d_model: 32
+nlayers: 3
+dim_feedforward: 128
+batch_size: 16
+dropout: 0
+d_model: 128
+plot_frequency: 16
+save_model_frequency: 500

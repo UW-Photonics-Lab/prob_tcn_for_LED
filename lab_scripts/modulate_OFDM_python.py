@@ -3,6 +3,7 @@ module_dir = r'C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled'
 if module_dir not in sys.path:
     sys.path.append(module_dir)
 from lab_scripts.constellation_diagram import QPSK_Constellation
+from lab_scripts.constellation_diagram import RingShapedConstellation
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -17,6 +18,14 @@ import torch
 from lab_scripts.logging_code import *
 
 decode_logger = setup_logger(log_file=r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\decode_bits_log.txt")
+
+
+def get_constellation(mode: str):
+        if mode == "qpsk":
+            constellation = QPSK_Constellation()
+        elif mode == "m5_apsk_constellation":
+            constellation = RingShapedConstellation(filename=r'C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\lab_scripts\saved_constellations\m5_apsk_constellation.npy')
+        return constellation
 
 def modulate_data_OFDM(mode: str, 
                        num_carriers: int, 
@@ -46,8 +55,7 @@ def modulate_data_OFDM(mode: str,
     N_data = int(np.floor(f_max / subcarrier_delta_f) - k_min)
     
     # Grab constellation object
-    if mode == "qpsk":
-        constellation = QPSK_Constellation()
+    constellation = get_constellation(mode)
     
     encoded_symbols = constellation.bits_to_symbols(bits)
     # decode_logger.debug(f"Encoded symbols: {encoded_symbols}")
@@ -139,9 +147,9 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
                                      subcarrier_delta_f: float) -> list:
     '''Converts received y(t) into a bit string with optional debugging plots'''
 
-    debug_plots = False
+    debug_plots = True
 
-     # Define paths for saving logs and plots
+    # Define paths for saving logs and plots
     log_dir = r'C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs'
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, 'demodulation_log.txt')
@@ -156,8 +164,8 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
         log.write("Demodulation Log\n")
         log.write("================\n")
         
-        if mode == "qpsk":
-            constellation = QPSK_Constellation()
+        constellation = get_constellation(mode)
+
         if debug_plots:
             plt.figure(figsize=(15, 10))
             
@@ -309,17 +317,17 @@ def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,
     # Create constellation for demodulation
 
 
-    symbols = torch.tensor(real_symbols) + 1j * torch.tensor(imag_symbols)
+    
 
     # Instead of grabbing from labview, directly take from decoder
-    if 'encoder_out' in STATE:
-        if STATE['encoder_out'] is not None:
-            symbols = STATE['encoder_out']
+    if 'decoder_out' in STATE:
+        symbols = STATE['decoder_out']
+    else:
+        symbols = torch.tensor(real_symbols) + 1j * torch.tensor(imag_symbols)
 
 
     # Grab constellation object
-    if mode == "qpsk":
-        constellation = QPSK_Constellation()
+    constellation = get_constellation(mode)
 
     # symbols = np.array(symbols)
     # Demap symbols to bits
@@ -330,18 +338,16 @@ def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,
     )
     distances = abs(symbols.reshape(-1, 1) - constellation_symbols.reshape(1, -1))
 
-    # Calculate EVM for backprop loss
-    EVM = torch.mean(torch.square(distances))
 
-    # Call backprop and log loss
-    if 'encoder_out' in STATE and 'decoder_out' in STATE:
-        update_weights(EVM)
 
     closest_idx = distances.argmin(axis=1)
-    decisions = constellation_symbols[closest_idx]
-    decided_bits = [constellation._symbols_to_bits_map[complex(symbol.real.item(), symbol.imag.item())] 
-                    for symbol in decisions]
+    # decisions = constellation_symbols[closest_idx]
+    # decided_bits = [constellation._symbols_to_bits_map[complex(symbol.real.item(), symbol.imag.item())] 
+    #                 for symbol in decisions]
 
+
+    constellation_symbols_list = list(constellation._symbols_to_bits_map.keys())
+    decided_bits = [constellation._symbols_to_bits_map[constellation_symbols_list[idx]] for idx in closest_idx.cpu().numpy()]
 
     # Flatten decided bits into a 1D array
     decided_bits_flat = [int(bit) for symbol_bits in decided_bits for bit in symbol_bits]
@@ -363,8 +369,12 @@ def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,
     # Calculate BER
     BER = float(np.sum(true_bits_array != decided_bits_flat_array) / len(true_bits_array))
 
-    # 
+    # Log frame BER
+    STATE['frame_BER'] = BER
 
+       # Call backprop and log loss
+    if 'encoder_out' in STATE and 'decoder_out' in STATE:
+        update_weights()
 
     SNR, PowerFactor = float(0), float(0) 
     return decided_bits_flat, float(BER), SNR, PowerFactor

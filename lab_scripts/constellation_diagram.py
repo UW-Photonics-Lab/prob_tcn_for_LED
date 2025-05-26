@@ -84,3 +84,58 @@ class QPSK_Constellation(ConstellationDiagram):
         plt.ylabel("Imaginary Part")
         plt.title("Complex Symbols")
         plt.show()
+
+
+from typing import Union
+class RingShapedConstellation(ConstellationDiagram):
+    def __init__(self, filename: Union[str, np.ndarray]):
+        if isinstance(filename, str):
+            symbols = np.load(filename)
+        else:
+            symbols = filename
+
+        assert len(symbols) & (len(symbols) - 1) == 0, "Number of symbols must be a power of 2"
+        self.modulation_order = int(np.log2(len(symbols)))
+        super().__init__(symbols)
+
+    def _generate_bit_map(self, complex_symbols: np.ndarray) -> dict[complex, str]:
+        """Use deterministic order (e.g., radius then angle) to assign bits."""
+        num_symbols = len(complex_symbols)
+        bit_width = int(np.log2(num_symbols))
+
+        def int_to_bin(i, width):
+            return format(i, f'0{width}b')
+
+        # Sort by radius, then angle
+        sort_key = lambda s: (np.round(np.abs(s), 8), np.angle(s))
+        sorted_symbols = sorted(complex_symbols, key=sort_key)
+        bit_strings = [int_to_bin(i, bit_width) for i in range(num_symbols)]
+
+        return dict(zip(sorted_symbols, bit_strings))
+
+    def bits_to_symbols(self, bits: str) -> np.ndarray:
+        if len(bits) % self.modulation_order != 0:
+            bits = bits.ljust(len(bits) + (self.modulation_order - len(bits) % self.modulation_order), '0')
+        grouped = [bits[i:i+self.modulation_order] for i in range(0, len(bits), self.modulation_order)]
+        inv_map = {v: k for k, v in self._symbols_to_bits_map.items()}
+        return np.array([inv_map[b] for b in grouped])
+
+    def symbols_to_bits(self, complex_symbols: np.ndarray) -> str:
+        return "".join([self._symbols_to_bits_map[s] for s in complex_symbols])
+
+    def visualize_constellation(self):
+        symbols = self._complex_symbols
+        reals = symbols.real
+        imags = symbols.imag
+        plt.figure(figsize=(6, 6))
+        plt.scatter(reals, imags, edgecolors='k', s=60)
+        for s, b in self._symbols_to_bits_map.items():
+            plt.text(s.real + 0.02, s.imag + 0.02, b, fontsize=8)
+        plt.axhline(0, color='gray', linewidth=1)
+        plt.axvline(0, color='gray', linewidth=1)
+        plt.grid(True, linestyle='--', alpha=0.5)
+        plt.gca().set_aspect('equal')
+        plt.title("Loaded Ring-Based Constellation")
+        plt.xlabel("Real Part")
+        plt.ylabel("Imaginary Part")
+        plt.show()
