@@ -38,7 +38,7 @@ def choose_hyperparameters():
         "save_model_frequency": 500,
         "EARLY_STOP_PATIENCE": 2000, 
         "EARLY_STOP_THRESHOLD": 0.5,
-        "modulator": 'qpsk',
+        "modulator": 'm5_apsk_constellation',
         "epochs": 10000,
         "gain" : 20,
         "dc_offset": 0

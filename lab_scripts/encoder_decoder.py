@@ -255,9 +255,9 @@ def update_weights(batch_size=config.batch_size) -> bool:
                         f"Batch avg loss {batch_avg_loss:.4f} exceeded threshold {config.EARLY_STOP_THRESHOLD}."
                     )
                     print(msg)
-                    return False
+                    return True
                 
-        return True
+        return False
     
 
     if STATE['cycle_count'] % config.plot_frequency == 0:
