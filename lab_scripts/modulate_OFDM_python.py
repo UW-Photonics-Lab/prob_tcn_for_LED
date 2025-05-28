@@ -147,7 +147,7 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
                                      subcarrier_delta_f: float) -> list:
     '''Converts received y(t) into a bit string with optional debugging plots'''
 
-    debug_plots = True
+    debug_plots = False
 
     # Define paths for saving logs and plots
     log_dir = r'C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs'
@@ -374,7 +374,10 @@ def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,
 
        # Call backprop and log loss
     if 'encoder_out' in STATE and 'decoder_out' in STATE:
-        update_weights()
+        cancel_run_early = update_weights()
+    else:
+        cancel_run_early = False
 
     SNR, PowerFactor = float(0), float(0) 
-    return decided_bits_flat, float(BER), SNR, PowerFactor
+    
+    return decided_bits_flat, float(BER), SNR, PowerFactor, cancel_run_early

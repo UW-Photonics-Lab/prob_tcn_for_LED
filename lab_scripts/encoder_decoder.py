@@ -161,6 +161,7 @@ def run_encoder(real, imag, f_low, f_high, subcarrier_spacing):
     # Grab current time
     start_time = time.time()
     STATE['start_time'] = start_time
+    STATE['ML_time'] = 0
 
     real = torch.tensor(real, dtype=torch.float32, device=device)
     imag = torch.tensor(imag, dtype=torch.float32, device=device)
@@ -175,38 +176,50 @@ def run_encoder(real, imag, f_low, f_high, subcarrier_spacing):
     STATE['encoder_out'] = out[:, k_min:] # Remove 0 frequency carriers
     STATE['frequencies'] = data_freqs
     # Store out in STATE to preserve computational graph
+
+    STATE['ML_time'] += (time.time() - start_time)
     return out.real.detach().cpu().numpy().tolist(), out.imag.detach().cpu().numpy().tolist()
 
 def differentiable_channel(encoder_out: torch.tensor, received_symbols: torch.tensor):
     return received_symbols / encoder_out # Divide equal sized tensors to get H(jw)
 
 def run_decoder(real, imag):
+    start_time = time.time()
     real = torch.tensor(real, dtype=torch.float32, device=device)
     imag = torch.tensor(imag, dtype=torch.float32, device=device)
 
     x = real + 1j * imag
-
-    print(x.shape, STATE['encoder_out'].shape)
     STATE['H_channel'] = differentiable_channel(x, STATE['encoder_out'])
 
     out =  STATE['decoder'](STATE['H_channel'] * STATE['encoder_out'])
-    out = out.flatten()
     # Store out in STATE to preserve computational graph
     STATE['decoder_in'] = x
     STATE['decoder_out'] = out
+    out = out.flatten() # Must flatten along batch dimension to output from labview
+    STATE['ML_time'] += (time.time() - start_time)
     return out.real.detach().cpu().contiguous().numpy().tolist(), out.imag.detach().cpu().contiguous().numpy().tolist()
 
 
-def update_weights(batch_size=config.batch_size):
+def update_weights(batch_size=config.batch_size) -> bool:
+    '''Updates weights
+
+    Returns:
+        cancel_early: bool flags whether to stop current training session
+    
+    
+    '''
     STATE['cycle_count'] += 1
     true_symbols = STATE['encoder_in']
     predicted_symbols = STATE['decoder_out']
     evm_loss = evm_loss_func(true_symbols, predicted_symbols)
     if evm_loss is not None:
+        start_time = time.time()
         STATE['loss_accumulator'].append(evm_loss)
 
         elapsed_time = time.time() - STATE['start_time']
-        wandb.log({"perf/time_encode_to_decode": elapsed_time}, step=STATE['cycle_count'])
+        # Calculate time for ML parts
+        STATE['ML_time'] += (time.time() - start_time)
+        
         # Push plots to wand
         if len(STATE['loss_accumulator']) == batch_size:
             batch_avg_loss = torch.mean(torch.stack(STATE['loss_accumulator']))
@@ -219,13 +232,40 @@ def update_weights(batch_size=config.batch_size):
             # Clear accumulator
             STATE['loss_accumulator'].clear()
 
+            # Save final loss so that optuna can use it later
+            with open("final_loss.txt", "w") as f:
+                    f.write(str(batch_avg_loss.item()))
+            
+            
+            wandb.log({"perf/time_for_ML": STATE['ML_time']}, step=STATE['cycle_count'])
+            wandb.log({"perf/time_encode_to_decode": elapsed_time}, step=STATE['cycle_count'])
+            # Percentage ML time
+            wandb.log({"perf/percent_time_for_ML": STATE['ML_time'] / elapsed_time}, step=STATE['cycle_count'])
+
+
+            # Check if need to cancel run early
+            if STATE['cycle_count'] > config.EARLY_STOP_PATIENCE:
+
+                if batch_avg_loss > config.EARLY_STOP_THRESHOLD:
+                    # Cancel training
+
+                        # Cancel training
+                    msg = (
+                        f"Early stopping triggered at step {STATE['cycle_count']}! "
+                        f"Batch avg loss {batch_avg_loss:.4f} exceeded threshold {config.EARLY_STOP_THRESHOLD}."
+                    )
+                    print(msg)
+                    return False
+                
+        return True
+    
 
     if STATE['cycle_count'] % config.plot_frequency == 0:
         log_constellation(step=STATE['cycle_count'], freqs=STATE['frequencies'], evm_loss=evm_loss)
 
         lr = optimizer.param_groups[0]["lr"]
         wandb.log({"train/lr": lr}, step=STATE['cycle_count'])
-        wandb.log({"perf/time_encode_to_decode": STATE['frame_BER']}, step=STATE['cycle_count'])
+        wandb.log({"perf/frame_BER": STATE['frame_BER']}, step=STATE['cycle_count'])
 
         for model_name in ['encoder', 'decoder']:
             model = STATE[model_name]
@@ -296,7 +336,7 @@ def log_constellation(step, freqs=None, evm_loss=-99):
             "Encoder Input": to_numpy(enc_in),
             "Encoder Output": to_numpy(enc_out),
             "Decoder Input": to_numpy(dec_in),
-            f"Decoder Output | Frame BER {STATE['frame_BER']} | Frame Loss {evm_loss}": to_numpy(dec_out),
+            f"Decoder Output | Frame BER {STATE['frame_BER']} | Frame Loss {round(evm_loss, 5)}": to_numpy(dec_out),
         }
 
         # Normalize frequency for color mapping (if provided)
