@@ -1,9 +1,21 @@
 import optuna
 import yaml
 import os
+from datetime import datetime
 
-STORAGE = "sqlite:///optuna_study.db"
-STUDY_NAME = "labview_transformer"
+STORAGE = "sqlite:///C:/Users/Public_Testing/Desktop/peled_interconnect/mldrivenpeled/experiments/optuna_study.db"
+
+def create_optuna():
+
+    STUDY_NAME = "labview_transformer_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    study = optuna.create_study(study_name=STUDY_NAME, storage=STORAGE, direction="minimize")
+    # trial = study.ask()
+    # trial_number = trial.number
+    # with open("trial_number.txt", "w") as f:
+    #     f.write(str(trial_number))
+
+    with open("study_name.txt", "w") as f:
+         f.write(STUDY_NAME)
 
 def choose_hyperparameters():
     ''' Choose hyperparameters for next trainig cycle
@@ -14,16 +26,18 @@ def choose_hyperparameters():
             epochs: int
             gain: Vpp
             dc_offset: Vdc
-
     '''
-    
-    try:
-        study = optuna.load_study(study_name=STUDY_NAME, storage=STORAGE)
-    except KeyError:
-        study = optuna.create_study(study_name=STUDY_NAME, storage=STORAGE, direction="minimize")
+    with open("study_name.txt", "r") as f:
+        study_name = f.read().strip()
+
+    study = optuna.load_study(study_name=study_name, storage=STORAGE)
     trial = study.ask()
 
-    batch_size = trial.suggest_categorical("batch_size", [16, 32])
+    with open("trial_number.txt", "w") as f:
+        f.write(str(trial.number))
+
+    # batch_size = trial.suggest_categorical("batch_size", [1, 4, 16, 32])
+    batch_size = 1
 
 
     config = {
@@ -38,10 +52,11 @@ def choose_hyperparameters():
         "save_model_frequency": 500,
         "EARLY_STOP_PATIENCE": 2000, 
         "EARLY_STOP_THRESHOLD": 0.5,
-        "modulator": 'm5_apsk_constellation',
-        "epochs": 10000,
+        "modulator": 'qpsk',
+        "epochs": 2,
         "gain" : 20,
-        "dc_offset": 0
+        "dc_offset": 0,
+        "optuna_study": study_name
     }
 
 
@@ -51,20 +66,19 @@ def choose_hyperparameters():
     with open(config_path, "w") as f:
         yaml.dump(config, f)
 
-    # Save the trial ID so LabVIEW can report results later
-    with open("trial_id.txt", "w") as f:
-        f.write(str(trial._trial_id))
-
     return config['modulator'], config['epochs'], config['gain'], config['dc_offset']
 
 def report_result():
-    study = optuna.load_study(study_name="labview_transformer", storage="sqlite:///optuna_study.db")
+    with open("study_name.txt", "r") as f:
+        study_name = f.read().strip()
 
-    with open("trial_id.txt", "r") as f:
-        trial_id = int(f.read())
+    study = optuna.load_study(study_name=study_name, storage=STORAGE)
+
+    with open("trial_number.txt", "r") as f:
+            trial_number = int(f.read())
+
 
     with open("final_loss.txt", "r") as f:
         loss_value = float(f.read())
 
-    trial = study.get_trial(trial_id)
-    study.tell(trial, loss_value)
+    study.tell(trial_number, loss_value)

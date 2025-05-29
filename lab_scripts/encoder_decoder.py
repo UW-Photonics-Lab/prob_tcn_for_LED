@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import matplotlib.colors as colors
 import time
+import pprint
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 config_path = os.path.join(script_dir, "..", "config.yml")
@@ -23,6 +24,12 @@ wandb.init(project="mldrivenpeled",
            config=hyperparams)
 config = wandb.config
 
+print(f"WandB run info:")
+print(f"  Name: {wandb.run.name}")
+print(f"  ID: {wandb.run.id}")
+print(f"  URL: {wandb.run.url}")
+print("Chosen hyperparameters for this session:")
+pprint.pprint(config)  
 
 # Set device
 if torch.cuda.is_available():
@@ -242,8 +249,8 @@ def update_weights(batch_size=config.batch_size) -> bool:
             # Percentage ML time
             wandb.log({"perf/percent_time_for_ML": STATE['ML_time'] / elapsed_time}, step=STATE['cycle_count'])
 
-
             # Check if need to cancel run early
+            output = False
             if STATE['cycle_count'] > config.EARLY_STOP_PATIENCE:
 
                 if batch_avg_loss > config.EARLY_STOP_THRESHOLD:
@@ -255,9 +262,9 @@ def update_weights(batch_size=config.batch_size) -> bool:
                         f"Batch avg loss {batch_avg_loss:.4f} exceeded threshold {config.EARLY_STOP_THRESHOLD}."
                     )
                     print(msg)
-                    return True
+                    output = True
                 
-        return False
+        
     
 
     if STATE['cycle_count'] % config.plot_frequency == 0:
@@ -289,9 +296,11 @@ def update_weights(batch_size=config.batch_size) -> bool:
             artifact = wandb.Artifact(f"{model_name}_ckpt_step{STATE['cycle_count']}", type="model")
             artifact.add_file(save_path)
             wandb.log_artifact(artifact)
+    return output
 
 def stop_training():
     if 'encoder_out' in STATE:
+        print("Finished all epochs!")
         # Save models
         model_save_dir = os.path.join(script_dir, "..", "saved_models")
         os.makedirs(model_save_dir, exist_ok=True)
@@ -336,7 +345,7 @@ def log_constellation(step, freqs=None, evm_loss=-99):
             "Encoder Input": to_numpy(enc_in),
             "Encoder Output": to_numpy(enc_out),
             "Decoder Input": to_numpy(dec_in),
-            f"Decoder Output | Frame BER {STATE['frame_BER']} | Frame Loss {round(evm_loss, 5)}": to_numpy(dec_out),
+            f"Decoder Output | Frame BER {round(STATE['frame_BER'], 3)} | Frame Loss {round(evm_loss.item(), 5)}": to_numpy(dec_out),
         }
 
         # Normalize frequency for color mapping (if provided)
