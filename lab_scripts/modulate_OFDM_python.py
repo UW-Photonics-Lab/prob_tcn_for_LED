@@ -33,7 +33,8 @@ def modulate_data_OFDM(mode: str,
                        cyclic_prefix_length: int,
                        f_min: float,
                        f_max: float,
-                       subcarrier_delta_f: float) -> tuple[list, list]:
+                       subcarrier_delta_f: float,
+                       num_symbols_per_frame: int) -> tuple[list, list, list, int]:
     '''Creates and n x m symbol matrix to fill frequency band for OFDM
     
         Args:
@@ -46,9 +47,12 @@ def modulate_data_OFDM(mode: str,
             Returns a tuple containing two lists representing two 2d arrays
             of Real{Symbols} and Imaginary{Symbols}
 
-            Each row is an indepedent OFDM frame to be transmitted    
+            Each row is an indepedent OFDM symbol to be transmitted    
     '''
     bits = "".join([str(x) for x in data])
+
+    # Account for frequency scaling with the AWG. Namely, if Nt symbols are sent successively,
+    # each OFDM symbol's carriers are scaled by Nt. This can be acomplished by driving each frame at subcarrier_delta_f / Nt
 
     k_min = int(np.floor(f_min / subcarrier_delta_f))
 
@@ -62,33 +66,37 @@ def modulate_data_OFDM(mode: str,
     true_bits = np.array(data)
 
 
+    max_symbols_per_frame = N_data * num_symbols_per_frame
+    if len(encoded_symbols) > max_symbols_per_frame:
+        raise ValueError(f"Too many symbols alloacated to frame! Max{max_symbols_per_frame} | Allocated {len(encoded_symbols)}")
+    
     # Calculate frame length
-    frame_length = N_data
-    # Reshape such that each row is a frame to be transmitted
-    if len(encoded_symbols) % frame_length != 0:
+    frame_length = N_data * num_symbols_per_frame
+    # Reshape such that each row is a symbol
+    if len(encoded_symbols) < frame_length:
         # Padd for full frame
         zeros_to_add = frame_length - len(encoded_symbols) % frame_length
-        padding_symbols = np.repeat(constellation.bits_to_symbols("00"), zeros_to_add)
+        padding_symbols = np.repeat(constellation.bits_to_symbols(constellation.modulation_order * "0"), zeros_to_add)
         bits_added = np.array(list(constellation.symbols_to_bits(padding_symbols)))
         encoded_symbols = np.hstack((encoded_symbols, padding_symbols))
         true_bits = np.hstack((true_bits, bits_added))
 
-    encoded_symbol_frames = encoded_symbols.reshape(-1, frame_length)
+    encoded_symbol_frame = encoded_symbols.reshape(num_symbols_per_frame, N_data) # [Nt, Nf]
 
     # Add zeros on front equal to k_min 
-    encoded_symbol_frames = np.hstack((np.zeros((encoded_symbol_frames.shape[0], k_min)), encoded_symbol_frames))
-    encoded_symbol_frames_real = encoded_symbol_frames.real.copy()
-    encoded_symbol_frames_imag = encoded_symbol_frames.imag.copy()
+    encoded_symbol_frame = np.hstack((np.zeros((encoded_symbol_frame.shape[0], k_min)), encoded_symbol_frame))
+    encoded_symbol_frame_real = encoded_symbol_frame.real.copy()
+    encoded_symbol_frame_imag = encoded_symbol_frame.imag.copy()
 
 
     # Reshape true bits by frame
-    number_of_frames, _ = encoded_symbol_frames.shape
-    grouped_true_bits = true_bits.reshape(number_of_frames, -1)
+    Nt, _ = encoded_symbol_frame.shape
+    grouped_true_bits = true_bits.reshape(Nt, -1)
 
     grouped_true_bits_list = [[str(element) for element in row] for row in grouped_true_bits.tolist()]
 
     # Return as real and imaginary parts
-    return encoded_symbol_frames_real, encoded_symbol_frames_imag, grouped_true_bits_list, int(N_data)
+    return encoded_symbol_frame_real, encoded_symbol_frame_imag, grouped_true_bits_list, int(N_data)
 
 
 AWG_MEMORY_LENGTH = 16384
@@ -100,21 +108,22 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
 
     
         Args:
-            symbol_groups: n x m matrix where n is number of frames and m in number of data carrier symbols
+            symbol_groups: Nt x Nf matrix where Nt is number of symbols per frame and Nf in number of data carrirs per symbol
 
         Outputs:
-            returns n x AWG_MEMORY_LENGTH matrix and the preable used for later correlation
+            returns 1 x AWG_MEMORY_LENGTH matrix and the preable used for later correlation
 
     '''
     symbol_groups = np.array(real_symbol_groups) + np.array(imag_symbol_groups) * 1j
+    N_t = symbol_groups.shape[0]
     barker_code = np.array([1, -1, 1, -1, 1], dtype=float)
     barker_code = np.repeat(barker_code, BARKER_LENGTH // len(barker_code)) # Set as 1%
-    IFFT_LENGTH = int(AWG_MEMORY_LENGTH - len(barker_code))
+    IFFT_LENGTH = int((AWG_MEMORY_LENGTH - len(barker_code)) // N_t) 
 
     # Add DC offset, Nyquist carrier, and conjugate symmetry
     symbol_groups_conjugate_flipped = np.conj(symbol_groups)[:, ::-1] # Flip along axis=1
     DC_nyquist = np.zeros(shape=(symbol_groups.shape[0], 1)) # Both are set to 0
-    full_symbols = np.hstack((DC_nyquist, symbol_groups, DC_nyquist, symbol_groups_conjugate_flipped))
+    full_symbols = np.hstack((DC_nyquist, symbol_groups, DC_nyquist, symbol_groups_conjugate_flipped)) # [Nt, Nf]
 
     # Take ifft with time interpolation
     x_t_groups = np.real(np.fft.ifft(full_symbols, axis=1, n=IFFT_LENGTH))
@@ -124,12 +133,15 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
     max_values = np.max(x_t_groups, axis=1, keepdims=True)
     x_t_groups = x_t_groups / (max_values + epsilon)
 
-    # Add on preamble to each frame
-    barker_code_grouped = np.tile(barker_code, (len(x_t_groups), 1))
-    x_t_groups_with_preamble = np.hstack((barker_code_grouped, x_t_groups)).astype(float)
-    x_t_groups_with_preamble = np.ascontiguousarray(x_t_groups_with_preamble)
 
-    return x_t_groups_with_preamble.tolist(), barker_code
+    # Flatten to create frame in time domain
+    x_t_frame = x_t_groups.flatten()
+    x_t_with_barker = np.concatenate([barker_code, x_t_frame])
+    x_t_with_barker = np.ascontiguousarray(x_t_with_barker).astype(float)
+
+    # Reshape to [1, AWG_MEMORY_LENGTH]
+    x_t_with_barker = x_t_with_barker[:AWG_MEMORY_LENGTH]  # truncate if needed
+    return x_t_with_barker.reshape(1, -1).tolist(), barker_code
 
 
 
@@ -144,10 +156,11 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
                                      mode: str,
                                      f_min: float,
                                      f_max: float,
-                                     subcarrier_delta_f: float) -> list:
+                                     subcarrier_delta_f: float,
+                                     Nt: int) -> list:
     '''Converts received y(t) into a bit string with optional debugging plots'''
 
-    debug_plots = False
+    debug_plots = True
 
     # Define paths for saving logs and plots
     log_dir = r'C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs'
@@ -246,47 +259,81 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
 
         # decode_logger.debug(f"Number of frames extracted: {len(frames)}\n")
 
-        frame_y_t = frames[0]
+        frame_y_t = np.array(frames[0])
+        decode_logger.debug(f"Frame length: {len(frame_y_t)}\n")
+        points_per_symbol = int(len(frame_y_t) / Nt)
 
-        # Perform FFT with proper normalization
-        Y_s = np.fft.fft(frame_y_t)
+
+        symbols = []
+        for i in range(Nt):
+            start = i * points_per_symbol
+            end = start + points_per_symbol
+            symbol = frame_y_t[start:end]
+            symbols.append(symbol)
+
+        # Step 3: Apply FFT to each symbol and stack into a matrix
+        Y_s_matrix = np.array([np.fft.fft(s) for s in symbols])
+        decode_logger.debug(f"Y_s Matrix Shsape: {Y_s_matrix.shape}\n")
+
 
         if debug_plots:
             plt.subplot(325)
-            limited_magnitude = np.abs(Y_s)
+            limited_magnitude = np.abs(Y_s_matrix[0])
 
             # Plot the FFT magnitude
             plt.plot(limited_magnitude)
-            plt.title('FFT Magnitude')
+            plt.title('FFT Magnitude of 1st symbol')
             plt.xlabel('Frequency (Hz)')
             plt.ylabel('Magnitude')
 
-        # Extract both positive and negative frequency carriers
+        # # Extract both positive and negative frequency carriers
         num_data_carriers = N_data
-        negative_carriers = Y_s[k_min + 1:num_data_carriers + k_min + 1]
-        positive_carriers = Y_s[-num_data_carriers -k_min - 1: -k_min -1]
-        data_subcarriers = negative_carriers
-        data_subcarriers = data_subcarriers * (np.max(np.abs(constellation._complex_symbols)) / np.max(np.abs(data_subcarriers)))
-        # decode_logger.debug(f"Received Positive Carriers: {data_subcarriers}")
+        decode_logger.debug(f"Number of Carriers: {N_data}\n")
+        # negative_carriers = Y_s[k_min + 1:num_data_carriers + k_min + 1]
+        # positive_carriers = Y_s[-num_data_carriers -k_min - 1: -k_min -1]
+        # data_subcarriers = negative_carriers
+        # data_subcarriers = data_subcarriers * (np.max(np.abs(constellation._complex_symbols)) / np.max(np.abs(data_subcarriers)))
+        # # decode_logger.debug(f"Received Positive Carriers: {data_subcarriers}")
 
-        negative_carriers_t = Y_s[:2 * num_data_carriers]
-        positive_carriers_t = Y_s[-2 * num_data_carriers:]
+        # negative_carriers_t = Y_s[:2 * num_data_carriers]
+        # positive_carriers_t = Y_s[-2 * num_data_carriers:]
 
-        negative_carriers_t = negative_carriers_t * (np.max(np.abs(constellation._complex_symbols)) / np.max(np.abs(negative_carriers_t)))
-        positive_carriers_t = positive_carriers_t * (np.max(np.abs(constellation._complex_symbols)) / np.max(np.abs(positive_carriers_t)))
+        # negative_carriers_t = negative_carriers_t * (np.max(np.abs(constellation._complex_symbols)) / np.max(np.abs(negative_carriers_t)))
+        # positive_carriers_t = positive_carriers_t * (np.max(np.abs(constellation._complex_symbols)) / np.max(np.abs(positive_carriers_t)))
 
-        # decode_logger.debug(f"Y pos: {positive_carriers_t}\n")
-        # decode_logger.debug(f"Y neg: {negative_carriers_t}\n")
+        # # decode_logger.debug(f"Y pos: {positive_carriers_t}\n")
+        # # decode_logger.debug(f"Y neg: {negative_carriers_t}\n")
 
+
+        data_subcarriers_all = []
+
+        for symbol_fft in Y_s_matrix:
+            negative_carriers = symbol_fft[k_min + 1:N_data + k_min + 1]
+            decode_logger.debug(f"Number of Received Carriers: {len(negative_carriers)}\n")
+            # Optionally include positive_carriers if your OFDM symbol is Hermitian symmetric
+            # positive_carriers = symbol_fft[-num_data_carriers - k_min - 1: -k_min - 1]
+
+            data_subcarriers_all.append(negative_carriers)  
+
+        normalized_data_subcarriers = []
+
+        for carriers in data_subcarriers_all:
+            scale = np.max(np.abs(constellation._complex_symbols)) / np.max(np.abs(carriers))
+            normalized_carriers = carriers * scale
+            normalized_data_subcarriers.append(normalized_carriers)
+
+
+        data_subcarriers = np.concatenate(normalized_data_subcarriers)
+        decode_logger.debug(f"Number Total Carriers: {len(data_subcarriers)}\n")
 
         if debug_plots:
             # Plot 6: Constellation Diagram
 
             # Calculate frequencies
-            frequencies = np.arange(f_min+ subcarrier_delta_f, 
+            frequencies_per_symbol = np.arange(f_min+ subcarrier_delta_f, 
                                     f_min + subcarrier_delta_f * num_data_carriers + subcarrier_delta_f, 
                                     subcarrier_delta_f)
-
+            frequencies = np.tile(frequencies_per_symbol, Nt)
             normalized_frequencies = (frequencies - np.min(frequencies)) / (np.max(frequencies) - np.min(frequencies))
             colors = plt.cm.viridis(normalized_frequencies)
 
