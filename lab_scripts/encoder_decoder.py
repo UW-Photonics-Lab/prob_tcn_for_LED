@@ -74,7 +74,7 @@ class FrequencyPositionalEmbedding(nn.Module):
         pe[:, :, 1::2] = torch.cos(angles)
         x = x + pe[:x.size(0)]
         return x
-    
+
 class SymbolEmbedding(nn.Module):
     def __init__(self, d_model: int):
         super().__init__()
@@ -95,7 +95,7 @@ class TransformerEncoder(nn.Module):
         super().__init__()
         self.frequency_embed = FrequencyPositionalEmbedding(d_model)
         self.symbol_embed = SymbolEmbedding(d_model)
-        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward=dim_feedforward, batch_first=True, dropout=dropout)
+        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward=dim_feedforward, batch_first=True, dropout=dropout, norm_first=True)
         self.transformer = nn.TransformerEncoder(encoder_layer, nlayers)
         self.output = nn.Linear(d_model, 2)
 
@@ -105,12 +105,12 @@ class TransformerEncoder(nn.Module):
         out = self.transformer(freq_embedded_symbols) # [B, N, d_model]
         out = self.output(out) #[B, N, 2]
         return out[..., 0] + 1j * out[..., 1] # Real and Imag
-    
+
 class TransformerDecoder(nn.Module):
     def __init__(self, d_model, nhead, nlayers, dim_feedforward, dropout):
         super().__init__()
         self.sym_embed = SymbolEmbedding(d_model)
-        decoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward=dim_feedforward, batch_first=True, dropout=dropout)
+        decoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward=dim_feedforward, batch_first=True, dropout=dropout, norm_first=True)
         self.transformer = nn.TransformerEncoder(decoder_layer, nlayers)
         self.output = nn.Linear(d_model, 2)
 
@@ -119,7 +119,7 @@ class TransformerDecoder(nn.Module):
         out = self.transformer(x_embed)
         out = self.output(out)
         return out[..., 0] + 1j * out[..., 1]
-    
+
 def evm_loss(true_symbols, predicted_symbols):
         return torch.mean((true_symbols.real - predicted_symbols.real) ** 2 + (true_symbols.imag - predicted_symbols.imag) ** 2)
 
@@ -178,7 +178,7 @@ def run_encoder(real, imag, f_low, f_high, subcarrier_spacing):
     x = real + 1j * imag
 
     data_freqs = torch.tensor(np.arange(f_low, f_high, subcarrier_spacing), dtype=torch.float32, device=device)
-   
+
     out = STATE['encoder'](x, freqs)
     STATE['encoder_in'] = x[:, k_min:]
     STATE['encoder_out'] = out[:, k_min:] # Remove 0 frequency carriers
@@ -393,7 +393,7 @@ def log_constellation(step, freqs=None, evm_loss=-99):
                 scatter = ax.scatter(symbols.real, symbols.imag, s=8, c=point_colors,label=label)
             else:
                 scatter = ax.scatter(symbols.real, symbols.imag, s=8, alpha=0.8, label=label)
-            
+
             ax.scatter(enc_in_np.real, enc_in_np.imag, s=20, c='gray', marker='x', label='Encoder Input')
             ax.set_title(label)
             ax.set_xlabel("Re")
