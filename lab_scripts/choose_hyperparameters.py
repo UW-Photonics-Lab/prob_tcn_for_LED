@@ -9,11 +9,6 @@ def create_optuna():
 
     STUDY_NAME = "labview_transformer_" + datetime.now().strftime("%Y%m%d_%H%M%S")
     study = optuna.create_study(study_name=STUDY_NAME, storage=STORAGE, direction="minimize")
-    # trial = study.ask()
-    # trial_number = trial.number
-    # with open("trial_number.txt", "w") as f:
-    #     f.write(str(trial_number))
-
     with open("study_name.txt", "w") as f:
          f.write(STUDY_NAME)
 
@@ -36,9 +31,7 @@ def choose_hyperparameters():
     with open("trial_number.txt", "w") as f:
         f.write(str(trial.number))
 
-    # batch_size = trial.suggest_categorical("batch_size", [1, 4, 16, 32])
-    batch_size = 1
-
+    batch_size = trial.suggest_categorical("batch_size", [8, 16, 32])
 
     config = {
         "lr": trial.suggest_float("lr", 1e-4, 1e-2, log=True),
@@ -50,10 +43,10 @@ def choose_hyperparameters():
         "d_model": trial.suggest_categorical("d_model", [64, 128, 256]),
         "plot_frequency": batch_size,
         "save_model_frequency": 500,
-        "EARLY_STOP_PATIENCE": 2000, 
+        "EARLY_STOP_PATIENCE": 200 // batch_size, 
         "EARLY_STOP_THRESHOLD": 0.5,
-        "modulator": 'qpsk',
-        "epochs": 2,
+        "modulator": 'm5_apsk_constellation',
+        "epochs": 125 * batch_size,
         "gain" : 20,
         "dc_offset": 0,
         "optuna_study": study_name

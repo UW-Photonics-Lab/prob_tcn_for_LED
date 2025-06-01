@@ -42,6 +42,7 @@ else:
 # Add a loss accumulator to state
 STATE['loss_accumulator'] = []
 STATE['cycle_count'] = 0
+STATE['batch_count'] = 0
 
 class FrequencyPositionalEmbedding(nn.Module):
     def __init__(self, d_model):
@@ -215,6 +216,7 @@ def update_weights(batch_size=config.batch_size) -> bool:
     
     
     '''
+    output = False
     STATE['cycle_count'] += 1
     true_symbols = STATE['encoder_in']
     predicted_symbols = STATE['decoder_out']
@@ -229,10 +231,11 @@ def update_weights(batch_size=config.batch_size) -> bool:
         
         # Push plots to wand
         if len(STATE['loss_accumulator']) == batch_size:
+            STATE['batch_count'] += 1
             batch_avg_loss = torch.mean(torch.stack(STATE['loss_accumulator']))
             STATE['scheduler'].step(batch_avg_loss)
             # Track with WandB
-            wandb.log({"train/loss" :batch_avg_loss.item()}, step=STATE['cycle_count'])
+            wandb.log({"train/loss" :batch_avg_loss.item()}, step=STATE['batch_count'])
             STATE['optimizer'].zero_grad()
             batch_avg_loss.backward()
             STATE['optimizer'].step()
@@ -244,21 +247,21 @@ def update_weights(batch_size=config.batch_size) -> bool:
                     f.write(str(batch_avg_loss.item()))
             
             
-            wandb.log({"perf/time_for_ML": STATE['ML_time']}, step=STATE['cycle_count'])
-            wandb.log({"perf/time_encode_to_decode": elapsed_time}, step=STATE['cycle_count'])
+            wandb.log({"perf/time_for_ML": STATE['ML_time']}, step=STATE['batch_count'])
+            wandb.log({"perf/time_encode_to_decode": elapsed_time}, step=STATE['batch_count'])
             # Percentage ML time
-            wandb.log({"perf/percent_time_for_ML": STATE['ML_time'] / elapsed_time}, step=STATE['cycle_count'])
+            wandb.log({"perf/percent_time_for_ML": STATE['ML_time'] / elapsed_time}, step=STATE['batch_count'])
 
             # Check if need to cancel run early
-            output = False
-            if STATE['cycle_count'] > config.EARLY_STOP_PATIENCE:
+            
+            if STATE['batch_count'] > config.EARLY_STOP_PATIENCE:
 
                 if batch_avg_loss > config.EARLY_STOP_THRESHOLD:
                     # Cancel training
 
                         # Cancel training
                     msg = (
-                        f"Early stopping triggered at step {STATE['cycle_count']}! "
+                        f"Early stopping triggered at batcg {STATE['batch_count']}! "
                         f"Batch avg loss {batch_avg_loss:.4f} exceeded threshold {config.EARLY_STOP_THRESHOLD}."
                     )
                     print(msg)
@@ -280,10 +283,39 @@ def update_weights(batch_size=config.batch_size) -> bool:
                 wandb.log({f"weights/{model_name}/{name}": wandb.Histogram(param.data.cpu())}, step=STATE['cycle_count'])
                 if param.grad is not None:
                     wandb.log({f"grads/{model_name}/{name}": wandb.Histogram(param.grad.cpu())}, step=STATE['cycle_count'])
+
                 else:
                     if len(STATE['loss_accumulator']) == batch_size:
                         print("Gradient is None Incorrectly!")
                 wandb.log({f"param_norms/{model_name}/{name}": torch.norm(param).item()}, step=STATE['cycle_count'])
+
+
+    if STATE['cycle_count'] % config.plot_frequency == 0:
+        step = STATE['batch_count']
+
+        log_constellation(step=step, freqs=STATE['frequencies'], evm_loss=evm_loss)
+
+        lr = optimizer.param_groups[0]["lr"]
+        wandb.log({"train/lr": lr}, step=step)
+        wandb.log({"perf/frame_BER": STATE['frame_BER']}, step=step)
+
+        for model_name in ['encoder', 'decoder']:
+            model = STATE[model_name]
+            for name, param in model.named_parameters():
+                # Log weights
+                wandb.log({f"weights/{model_name}/{name}": wandb.Histogram(param.data.cpu())}, step=step)
+
+                # Log gradients and accumulate norm
+                if param.grad is not None:
+                    grad = param.grad.detach().cpu()
+                    wandb.log({f"grads/{model_name}/{name}": wandb.Histogram(grad)}, step=step)
+
+                    # Calculate norm
+                    grad_norm = grad.norm().item()
+                    wandb.log({f"grad_norms/{model_name}/{name}": grad_norm}, step=step)
+                else:
+                    if len(STATE['loss_accumulator']) == batch_size:
+                        print("Gradient is None Incorrectly!")
 
     if STATE['cycle_count'] % config.save_model_frequency == 0:
         model_save_dir = os.path.join(script_dir, "..", "saved_models")
@@ -377,9 +409,11 @@ def log_constellation(step, freqs=None, evm_loss=-99):
             cbar = fig.colorbar(sm, ax=axs, orientation='vertical', fraction=0.02, pad=0.02)
             cbar.set_label("Carrier Frequency (Hz)")
 
-        # plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        wandb.log({"Constellation Diagram": wandb.Image(fig)}, step=step)
-        plt.close(fig)
+        os.makedirs("wandb_constellations", exist_ok=True)
+        plot_path = f"wandb_constellations/constellation_step_{step}.png"
+        fig.savefig(plot_path, dpi=150)
+        wandb.log({"Constellation Diagram": wandb.Image(plot_path)}, step=step)
+        os.remove(plot_path)
 
     except Exception as e:
         print(f"Failed to plot constellation at step {step}: {e}")
