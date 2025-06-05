@@ -99,10 +99,12 @@ def modulate_data_OFDM(mode: str,
     return encoded_symbol_frame_real, encoded_symbol_frame_imag, grouped_true_bits_list, int(N_data)
 
 
-AWG_MEMORY_LENGTH = 16384
+# AWG_MEMORY_LENGTH = 16384
 # AWG_MEMORY_LENGTH = 105
+AWG_MEMORY_LENGTH = 65536
 
 BARKER_LENGTH = int(0.01 * (AWG_MEMORY_LENGTH)) if int(0.01 * (AWG_MEMORY_LENGTH)) > 5 else 5
+CP_RATIO = 0
 def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: list[list[float]], cyclic_prefix_length: int) -> list[float]:
     '''Takes a symbol frame matrix and converts and x(t) frame matrix
 
@@ -120,27 +122,43 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
     barker_code = np.repeat(barker_code, BARKER_LENGTH // len(barker_code)) # Set as 1%
     IFFT_LENGTH = int((AWG_MEMORY_LENGTH - len(barker_code)) // N_t) 
 
+    '''CP'''
+    IFFT_LENGTH = int((AWG_MEMORY_LENGTH - len(barker_code)) // (N_t * (1 + CP_RATIO)))
+    cyclic_prefix_length = int(IFFT_LENGTH * CP_RATIO)
+
     # Add DC offset, Nyquist carrier, and conjugate symmetry
     symbol_groups_conjugate_flipped = np.conj(symbol_groups)[:, ::-1] # Flip along axis=1
     DC_nyquist = np.zeros(shape=(symbol_groups.shape[0], 1)) # Both are set to 0
     full_symbols = np.hstack((DC_nyquist, symbol_groups, DC_nyquist, symbol_groups_conjugate_flipped)) # [Nt, Nf]
 
-    # Take ifft with time interpolation
-    x_t_groups = np.real(np.fft.ifft(full_symbols, axis=1, n=IFFT_LENGTH))
+    
+    # # Take ifft with time interpolation
+    # x_t_groups = np.real(np.fft.ifft(full_symbols, axis=1, n=IFFT_LENGTH))
 
-    # Normalize x_t with epsilon to avoid division by zero
-    epsilon = 1e-12  # Small value to prevent division by zero
-    max_values = np.max(x_t_groups, axis=1, keepdims=True)
-    x_t_groups = x_t_groups / (max_values + epsilon)
+    '''CP'''
+    x_t_no_cp = np.real(np.fft.ifft(full_symbols, axis=1, n=IFFT_LENGTH))
+
+    # Add cyclic prefix per symbol
+    x_t_groups = []
+    for row in x_t_no_cp:
+        cp = row[-cyclic_prefix_length:]
+        with_cp = np.concatenate([cp, row])
+        x_t_groups.append(with_cp)
+
+    x_t_groups = np.stack(x_t_groups)  # shape: [Nt, IFFT_LENGTH + CP_length]
+  
 
 
     # Flatten to create frame in time domain
     x_t_frame = x_t_groups.flatten()
+    max_abs_val = np.max(np.abs(x_t_frame)) + 1e-12  # avoid div-by-zero
+    x_t_frame /= max_abs_val
     x_t_with_barker = np.concatenate([barker_code, x_t_frame])
     x_t_with_barker = np.ascontiguousarray(x_t_with_barker).astype(float)
-
-    # Reshape to [1, AWG_MEMORY_LENGTH]
     x_t_with_barker = x_t_with_barker[:AWG_MEMORY_LENGTH]  # truncate if needed
+    x_t_with_barker = np.clip(x_t_with_barker, -1.0, 1.0)
+    # x_t_with_barker = np.round(x_t_with_barker * 2047) / 2047 # 12 bit resolution
+    
     return x_t_with_barker.reshape(1, -1).tolist(), barker_code
 
 
@@ -160,7 +178,7 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
                                      Nt: int) -> list:
     '''Converts received y(t) into a bit string with optional debugging plots'''
 
-    debug_plots = True
+    debug_plots = False
 
     # Define paths for saving logs and plots
     log_dir = r'C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs'
@@ -259,16 +277,39 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
 
         # decode_logger.debug(f"Number of frames extracted: {len(frames)}\n")
 
+        # frame_y_t = np.array(frames[0])
+        # decode_logger.debug(f"Frame length: {len(frame_y_t)}\n")
+        # points_per_symbol = int(len(frame_y_t) / Nt)
+
+
+        # symbols = []
+        # for i in range(Nt):
+        #     start = i * points_per_symbol
+        #     end = start + points_per_symbol
+        #     symbol = frame_y_t[start:end]
+        #     symbols.append(symbol)
+
         frame_y_t = np.array(frames[0])
-        decode_logger.debug(f"Frame length: {len(frame_y_t)}\n")
-        points_per_symbol = int(len(frame_y_t) / Nt)
+        frame_len = len(frame_y_t)
+        symbol_len = frame_len // Nt
+        CP_length = int(symbol_len * CP_RATIO)
+        fft_len = symbol_len - CP_length
 
-
+        # Target sample centers for each symbol
         symbols = []
         for i in range(Nt):
-            start = i * points_per_symbol
-            end = start + points_per_symbol
-            symbol = frame_y_t[start:end]
+            # start = i * symbol_len
+            # end = (i + 1) * symbol_len
+
+            # New: account for CP
+            start = i * symbol_len
+            end = start + symbol_len
+
+            # Create fractional indices for the symbol interval
+            x_interp = np.linspace(start + CP_length, end, num=int(np.round(fft_len)), endpoint=False)
+
+            # Interpolate at fractional positions
+            symbol = np.interp(x_interp, np.arange(frame_len), frame_y_t)
             symbols.append(symbol)
 
         # Step 3: Apply FFT to each symbol and stack into a matrix
@@ -347,7 +388,6 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
             plt.ylabel('Imaginary')
             plt.legend()
             plt.grid(True)
-
             cbar = plt.colorbar(scatter)
             cbar.set_label('Carrier Frequency (Hz)')
 

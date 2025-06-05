@@ -12,6 +12,7 @@ import matplotlib.cm as cm
 import matplotlib.colors as colors
 import time
 import pprint
+from transformers import get_linear_schedule_with_warmup
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 config_path = os.path.join(script_dir, "..", "config.yml")
@@ -136,9 +137,31 @@ decoder = TransformerDecoder(d_model=config.d_model,
                              dim_feedforward=config.dim_feedforward,
                              dropout=config.dropout).to(device)
 
-optimizer = optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=float(config.lr))
-scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10, min_lr=1e-6)
 
+def apply_weight_init(model, method):
+    for name, module in model.named_modules():
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            if method == "xavier":
+                nn.init.xavier_uniform_(module.weight)
+            elif method == "kaiming":
+                nn.init.kaiming_uniform_(module.weight, nonlinearity="relu")
+            elif method == "normal":
+                nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        if hasattr(module, "bias") and module.bias is not None:
+            nn.init.constant_(module.bias, 0)
+
+apply_weight_init(encoder, config.weight_init)
+apply_weight_init(decoder, config.weight_init)
+
+optimizer = optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=float(config.lr))
+if config.scheduler_type == "reduce_lr_on_plateu":
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10, min_lr=1e-6)
+elif config.scheduler_type == "warmup":
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=config.warmup_steps,
+        num_training_steps=config.epochs
+    )
 # Add these models to STATE to pass information among scripts
 
 STATE['encoder'] = encoder
@@ -192,10 +215,11 @@ def differentiable_channel(encoder_out: torch.tensor, received_symbols: torch.te
     return received_symbols / encoder_out # Divide equal sized tensors to get H(jw)
 
 def run_decoder(real, imag):
+    # --- Reshape input to [Nt, Nf] ---
+    Nt, Nf = STATE['encoder_out'].shape
     start_time = time.time()
-    real = torch.tensor(real, dtype=torch.float32, device=device)
-    imag = torch.tensor(imag, dtype=torch.float32, device=device)
-
+    real = torch.tensor(real, dtype=torch.float32, device=device).reshape(Nt, Nf)
+    imag = torch.tensor(imag, dtype=torch.float32, device=device).reshape(Nt, Nf)
     x = real + 1j * imag
     STATE['H_channel'] = differentiable_channel(x, STATE['encoder_out'])
 
@@ -235,7 +259,7 @@ def update_weights(batch_size=config.batch_size) -> bool:
             batch_avg_loss = torch.mean(torch.stack(STATE['loss_accumulator']))
             STATE['scheduler'].step(batch_avg_loss)
             # Track with WandB
-            wandb.log({"train/loss" :batch_avg_loss.item()}, step=STATE['batch_count'])
+            wandb.log({"train/loss" :batch_avg_loss.item()}, step=STATE['cycle_count'])
             STATE['optimizer'].zero_grad()
             batch_avg_loss.backward()
             STATE['optimizer'].step()
@@ -247,10 +271,10 @@ def update_weights(batch_size=config.batch_size) -> bool:
                     f.write(str(batch_avg_loss.item()))
             
             
-            wandb.log({"perf/time_for_ML": STATE['ML_time']}, step=STATE['batch_count'])
-            wandb.log({"perf/time_encode_to_decode": elapsed_time}, step=STATE['batch_count'])
+            wandb.log({"perf/time_for_ML": STATE['ML_time']}, step=STATE['cycle_count'])
+            wandb.log({"perf/time_encode_to_decode": elapsed_time}, step=STATE['cycle_count'])
             # Percentage ML time
-            wandb.log({"perf/percent_time_for_ML": STATE['ML_time'] / elapsed_time}, step=STATE['batch_count'])
+            wandb.log({"perf/percent_time_for_ML": STATE['ML_time'] / elapsed_time}, step=STATE['cycle_count'])
 
             # Check if need to cancel run early
             
@@ -270,28 +294,28 @@ def update_weights(batch_size=config.batch_size) -> bool:
         
     
 
+    # if STATE['cycle_count'] % config.plot_frequency == 0:
+    #     log_constellation(step=STATE['cycle_count'], freqs=STATE['frequencies'], evm_loss=evm_loss)
+
+    #     lr = optimizer.param_groups[0]["lr"]
+    #     wandb.log({"train/lr": lr}, step=STATE['cycle_count'])
+    #     wandb.log({"perf/frame_BER": STATE['frame_BER']}, step=STATE['cycle_count'])
+
+    #     for model_name in ['encoder', 'decoder']:
+    #         model = STATE[model_name]
+    #         for name, param in model.named_parameters():
+    #             wandb.log({f"weights/{model_name}/{name}": wandb.Histogram(param.data.cpu())}, step=STATE['cycle_count'])
+    #             if param.grad is not None:
+    #                 wandb.log({f"grads/{model_name}/{name}": wandb.Histogram(param.grad.cpu())}, step=STATE['cycle_count'])
+
+    #             else:
+    #                 if len(STATE['loss_accumulator']) == batch_size:
+    #                     print("Gradient is None Incorrectly!")
+    #             wandb.log({f"param_norms/{model_name}/{name}": torch.norm(param).item()}, step=STATE['cycle_count'])
+
+
     if STATE['cycle_count'] % config.plot_frequency == 0:
-        log_constellation(step=STATE['cycle_count'], freqs=STATE['frequencies'], evm_loss=evm_loss)
-
-        lr = optimizer.param_groups[0]["lr"]
-        wandb.log({"train/lr": lr}, step=STATE['cycle_count'])
-        wandb.log({"perf/frame_BER": STATE['frame_BER']}, step=STATE['cycle_count'])
-
-        for model_name in ['encoder', 'decoder']:
-            model = STATE[model_name]
-            for name, param in model.named_parameters():
-                wandb.log({f"weights/{model_name}/{name}": wandb.Histogram(param.data.cpu())}, step=STATE['cycle_count'])
-                if param.grad is not None:
-                    wandb.log({f"grads/{model_name}/{name}": wandb.Histogram(param.grad.cpu())}, step=STATE['cycle_count'])
-
-                else:
-                    if len(STATE['loss_accumulator']) == batch_size:
-                        print("Gradient is None Incorrectly!")
-                wandb.log({f"param_norms/{model_name}/{name}": torch.norm(param).item()}, step=STATE['cycle_count'])
-
-
-    if STATE['cycle_count'] % config.plot_frequency == 0:
-        step = STATE['batch_count']
+        step = STATE['cycle_count']
 
         log_constellation(step=step, freqs=STATE['frequencies'], evm_loss=evm_loss)
 

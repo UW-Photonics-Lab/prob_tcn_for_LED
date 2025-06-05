@@ -31,7 +31,18 @@ def choose_hyperparameters():
     with open("trial_number.txt", "w") as f:
         f.write(str(trial.number))
 
-    batch_size = trial.suggest_categorical("batch_size", [8, 16, 32])
+    batch_size = trial.suggest_categorical("batch_size", [1, 8, 16, 32])
+
+    '''
+    Modulators:
+    m5_apsk_constellation
+    qpsk
+
+    '''
+    epochs = 125 * batch_size
+    warmup_ratio = trial.suggest_float("warmup_ratio", 0.0, 0.2)
+    warmup_steps = int(warmup_ratio * epochs)
+    scheduler_type = trial.suggest_categorical("scheduler_type", ['warmup', 'reduce_lr_on_plateu'])
 
     config = {
         "lr": trial.suggest_float("lr", 1e-4, 1e-2, log=True),
@@ -49,7 +60,11 @@ def choose_hyperparameters():
         "epochs": 125 * batch_size,
         "gain" : 20,
         "dc_offset": 0,
-        "optuna_study": study_name
+        "optuna_study": study_name,
+        "num_symbols_per_frame" : 4,
+        "scheduler_type": scheduler_type,
+        "warmup_steps": warmup_steps,
+        "weight_init": trial.suggest_categorical("weight_init", ["xavier", "kaiming", "normal"])
     }
 
 
@@ -59,7 +74,7 @@ def choose_hyperparameters():
     with open(config_path, "w") as f:
         yaml.dump(config, f)
 
-    return config['modulator'], config['epochs'], config['gain'], config['dc_offset']
+    return config['modulator'], config['epochs'], config['gain'], config['dc_offset'], config['num_symbols_per_frame']
 
 def report_result():
     with open("study_name.txt", "r") as f:
