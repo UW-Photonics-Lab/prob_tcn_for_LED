@@ -54,7 +54,7 @@ def choose_hyperparameters():
         "d_model": trial.suggest_categorical("d_model", [64, 128, 256]),
         "plot_frequency": batch_size,
         "save_model_frequency": 500,
-        "EARLY_STOP_PATIENCE": 200 // batch_size, 
+        "EARLY_STOP_PATIENCE": 500 // batch_size, 
         "EARLY_STOP_THRESHOLD": 0.5,
         "modulator": 'm5_apsk_constellation',
         "epochs": 125 * batch_size,
@@ -64,7 +64,11 @@ def choose_hyperparameters():
         "num_symbols_per_frame" : 4,
         "scheduler_type": scheduler_type,
         "warmup_steps": warmup_steps,
-        "weight_init": trial.suggest_categorical("weight_init", ["xavier", "kaiming", "normal"])
+        "weight_init": trial.suggest_categorical("weight_init", ["xavier", "kaiming", "normal", "default"]),
+        "f3dB": 6e6,
+        "OFDM_period": 1e4,
+        "num_points_time": 65536,
+        "cnn": trial.suggest_categorical("cnn", [True, False])
     }
 
 

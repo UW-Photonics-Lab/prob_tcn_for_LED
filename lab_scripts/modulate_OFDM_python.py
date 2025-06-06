@@ -57,6 +57,9 @@ def modulate_data_OFDM(mode: str,
     k_min = int(np.floor(f_min / subcarrier_delta_f))
 
     N_data = int(np.floor(f_max / subcarrier_delta_f) - k_min)
+
+    STATE['Nt'] = num_symbols_per_frame
+    STATE['Nf'] = N_data
     
     # Grab constellation object
     constellation = get_constellation(mode)
@@ -178,7 +181,7 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
                                      Nt: int) -> list:
     '''Converts received y(t) into a bit string with optional debugging plots'''
 
-    debug_plots = False
+    debug_plots = True
 
     # Define paths for saving logs and plots
     log_dir = r'C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs'
