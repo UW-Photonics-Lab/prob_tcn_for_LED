@@ -34,7 +34,8 @@ def modulate_data_OFDM(mode: str,
                        cyclic_prefix_length: int,
                        f_min: float,
                        f_max: float,
-                       subcarrier_delta_f: float) -> tuple[list, list]:
+                       subcarrier_delta_f: float,
+                       num_symbols_per_frame: int) -> tuple[list, list]:
     '''Creates and n x m symbol matrix to fill frequency band for OFDM
     
         Args:
@@ -88,8 +89,9 @@ def modulate_data_OFDM(mode: str,
 
     grouped_true_bits_list = [[str(element) for element in row] for row in grouped_true_bits.tolist()] # Converts the NumPy 2D array --> regular Python list of lists of integers -  for comparison at the reciver
 
+    STATE["grouped_true_bits_list"] = grouped_true_bits_list
     # Return as real and imaginary parts
-    return encoded_symbol_frames_real, encoded_symbol_frames_imag, grouped_true_bits_list, int(N_data) # Returning the final 2D array symbols - real, imaginary, 2D bits grid, No of data subcarriers
+    return encoded_symbol_frames_real, encoded_symbol_frames_imag, int(N_data) # Returning the final 2D array symbols - real, imaginary, 2D bits grid, No of data subcarriers
 
     # In the above code - eventhough every row represents an OFDM frame, at a time only one is sent with a preamble - 
     # encoded_symbols --> each row --> zeros corresponding to the intial subcarriers and then the bits of data subcarriers
@@ -196,7 +198,8 @@ def symbols_to_xt(
         waveform = np.concatenate((preamble_td, td)).tolist()
         waveforms.append(waveform)
 
-    return waveforms, preamble_td.tolist(), N # Returning the time domain waveforms (row - preamble + OFDM Frame), preamble, 
+    STATE['IFFT_LENGTH'] = N
+    return waveforms, preamble_td.tolist() # Returning the time domain waveforms (row - preamble + OFDM Frame), preamble, 
                                               # N - point IFFT - to apply same point FFT at the receiver
 
 
@@ -397,7 +400,7 @@ def demodulate_OFDM_one_symbol_frame(
     mode: str,
     f_min: float,
     f_max: float,
-    subcarrier_delta_f: float, grouped_true_bits_list: list[list[str]], FFT_length: int # Will have to input this as well as the OFDM frame length - IFFT pt
+    subcarrier_delta_f: float# Will have to input this as well as the OFDM frame length - IFFT pt
 ) -> tuple[list[np.ndarray], list[list[int]], list[np.ndarray]]:
     """
     1. Drift correction via spline interpolation.
@@ -423,7 +426,7 @@ def demodulate_OFDM_one_symbol_frame(
     voltages     = interp_func(t_nominal)
 
     # Step 2: Resample to 10× AWG rate
-    fs_tx     = (len(preamble_sequence) + FFT_length)*(freq_AWG) # 80 - preamble length, FFT_length - OFDM Frame length
+    fs_tx     = (len(preamble_sequence) + STATE['IFFT_LENGTH'])*(freq_AWG) # 80 - preamble length, FFT_length - OFDM Frame length
     fs_rx_new = fs_tx * 10
     t_rx      = np.arange(len(voltages)) / fs_nominal
     duration  = len(voltages) / fs_nominal
@@ -449,7 +452,7 @@ def demodulate_OFDM_one_symbol_frame(
     valid_indices = []
     corr_plots    = []
     L             = len(preamble_sequence)
-    full_frame    = L + FFT_length
+    full_frame    = L + STATE['IFFT_LENGTH']
 
     for col in copies:
         # Correlate with known preamble
@@ -515,7 +518,7 @@ def demodulate_OFDM_one_symbol_frame(
 
             # 5) # Single-symbol FFT
             #N = OFDM_Frame_Length 
-            P = np.fft.fft(payload_no_cp, n=FFT_length)
+            P = np.fft.fft(payload_no_cp, n=STATE['IFFT_LENGTH'])
             # only the actual data subcarriers, k_min+1…k_min+N_data
             data_bins = P[k_min+1 : k_min+1+N_data] * scaling
 
@@ -531,7 +534,7 @@ def demodulate_OFDM_one_symbol_frame(
         points        = np.array(list(sym_map.keys()))
 
         # Bits of the first transmitted frame
-        tx_frame_bits = [int(b) for b in grouped_true_bits_list[0]]
+        tx_frame_bits = [int(b) for b in STATE['grouped_true_bits_list'][0]]
 
         best_ber   = float('inf')
         best_first = None
