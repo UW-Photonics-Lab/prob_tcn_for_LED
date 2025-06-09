@@ -181,6 +181,9 @@ def symbols_to_xt(
 
     # Total OFDM size (N-point IFFT)
     N = 2 * N_data + 2  # DC + N_data + Nyquist + mirrored N_data
+    
+    # Prepare output list
+    waveforms = []
 
     # Prepare output list
     waveforms = []
