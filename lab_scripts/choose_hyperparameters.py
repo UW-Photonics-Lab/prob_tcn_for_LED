@@ -32,6 +32,7 @@ def choose_hyperparameters():
         f.write(str(trial.number))
 
     batch_size = trial.suggest_categorical("batch_size", [1, 8, 16, 32])
+    batch_size = 1
 
     '''
     Modulators:
@@ -39,7 +40,7 @@ def choose_hyperparameters():
     qpsk
 
     '''
-    epochs = 125 * batch_size
+    epochs = 10 * batch_size
     warmup_ratio = trial.suggest_float("warmup_ratio", 0.0, 0.2)
     warmup_steps = int(warmup_ratio * epochs)
     scheduler_type = trial.suggest_categorical("scheduler_type", ['warmup', 'reduce_lr_on_plateu'])
@@ -57,7 +58,7 @@ def choose_hyperparameters():
         "EARLY_STOP_PATIENCE": 100 // batch_size, 
         "EARLY_STOP_THRESHOLD": 0.5,
         "modulator": 'm5_apsk_constellation',
-        "epochs": 125 * batch_size,
+        "epochs": epochs,
         "gain" : 20,
         "dc_offset": 0,
         "optuna_study": study_name,

@@ -280,7 +280,7 @@ def run_time_encoder(real_x_t):
         print("Encoder out doesn't have grad!")
     return out.detach().cpu().contiguous().numpy().tolist()
 
-def differentiable_channel(encoder_out: torch.tensor, decoder_in: torch.tensor):
+def differentiable_channel(x, encoder_out: torch.tensor, decoder_in: torch.tensor):
 
     if config.cnn == True:
         Nf = STATE['Nf']
@@ -290,14 +290,12 @@ def differentiable_channel(encoder_out: torch.tensor, decoder_in: torch.tensor):
         I_s = torch.cat([I_s, remainder_zeros])
         # Ensure length is a multiple of Nt
         total_len = (I_s.numel() // Nt) * Nt
-        def H(x):
-            x_flat = (x * (I_s[:total_len] / encoder_out.flatten()[:total_len]))
-            return torch.fft.fft(x_flat.reshape(Nt, -1), axis=1)[:Nf]
-        return H
+        x_flat = (x * (I_s[:total_len] / encoder_out.flatten()[:total_len]))
+        return torch.fft.fft(x_flat.reshape(Nt, -1), axis=1)[:Nf]
+
     else:
-        def H(x):
-            x * (decoder_in / encoder_out) # Divide equal sized tensors to get H(jw)
-        return H
+        return x * (decoder_in / encoder_out) # Divide equal sized tensors to get H(jw)
+
 
 def run_decoder(real, imag):
     # --- Reshape input to [Nt, Nf] ---
@@ -307,9 +305,9 @@ def run_decoder(real, imag):
     imag = torch.tensor(imag, dtype=torch.float32, device=device).reshape(Nt, Nf)
     x = real + 1j * imag
     STATE['decoder_in'] = x
-    STATE['H_channel'] = differentiable_channel(STATE['encoder_out'], STATE['decoder_in'])
+    
 
-    out =  STATE['decoder'](STATE['H_channel'](STATE['encoder_out']))
+    out =  STATE['decoder'](differentiable_channel(x, STATE['encoder_out'], STATE['decoder_in']))
     # Store out in STATE to preserve computational graph
     STATE['decoder_in'] = x
     STATE['decoder_out'] = out
