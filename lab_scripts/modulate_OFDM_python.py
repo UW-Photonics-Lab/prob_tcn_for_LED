@@ -91,7 +91,21 @@ def modulate_data_OFDM(mode: str,
 
     STATE["grouped_true_bits_list"] = grouped_true_bits_list
     # Return as real and imaginary parts
-    return encoded_symbol_frames_real, encoded_symbol_frames_imag, int(N_data) # Returning the final 2D array symbols - real, imaginary, 2D bits grid, No of data subcarriers
+
+   # Instead of logging every value, just log the shapes:
+    num_frames = len(grouped_true_bits_list)
+    bits_per_frame = len(grouped_true_bits_list[0]) if num_frames>0 else 0
+    decode_logger.debug(f"grouped_true_bits_list: {num_frames} frames × {bits_per_frame} bits/frame")
+
+    # encoded_symbol_frames_real is a NumPy 2D array
+    rows_real, cols_real = encoded_symbol_frames_real.shape
+    decode_logger.debug(f"encoded_symbol_frames_real: {rows_real} frames × {cols_real} bins/frame")
+
+    rows_imag, cols_imag = encoded_symbol_frames_imag.shape
+    decode_logger.debug(f"encoded_symbol_frames_imag: {rows_imag} frames × {cols_imag} bins/frame")
+
+    
+    return encoded_symbol_frames_real, encoded_symbol_frames_imag, grouped_true_bits_list, int(N_data) # Returning the final 2D array symbols - real, imaginary, 2D bits grid, No of data subcarriers
 
     # In the above code - eventhough every row represents an OFDM frame, at a time only one is sent with a preamble - 
     # encoded_symbols --> each row --> zeros corresponding to the intial subcarriers and then the bits of data subcarriers
@@ -168,6 +182,9 @@ def symbols_to_xt(
     # Total OFDM size (N-point IFFT)
     N = 2 * N_data + 2  # DC + N_data + Nyquist + mirrored N_data
 
+    # Prepare output list
+    waveforms = []
+
                 # --- Inline OFDM preamble generation ---
     # Use a fixed 64-point FFT preamble of 31 alternating bits
     # 1. Define 31-bit alternating pattern
@@ -197,6 +214,34 @@ def symbols_to_xt(
         # 3. Prepend the preamble
         waveform = np.concatenate((preamble_td, td)).tolist()
         waveforms.append(waveform)
+
+    # Log dimensions
+    num_frames = len(waveforms)
+    frame_length = len(waveforms[0]) if num_frames else 0
+    decode_logger.debug(f"waveforms: {num_frames} frames × {frame_length} samples/frame")
+
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    # ... after you have waveforms defined ...
+    # Plot all frames on one figure
+    fig, ax = plt.subplots(figsize=(8,4))
+    for i, frame in enumerate(waveforms[:5]):
+        ax.plot(frame, label=f'Frame {i}')
+    ax.set_title("Time-domain OFDM Frames")
+    ax.set_xlabel("Sample Index")
+    ax.set_ylabel("Amplitude")
+    ax.legend(loc='upper right')
+    ax.grid(True)
+    plt.tight_layout()
+
+    # Now fig exists:
+    plot_path = r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\ofdm_frames_single.png"
+    fig.savefig(plot_path, dpi=150)
+    plt.close(fig)
+
+
 
     STATE['IFFT_LENGTH'] = N
     return waveforms, preamble_td.tolist() # Returning the time domain waveforms (row - preamble + OFDM Frame), preamble, 
@@ -400,7 +445,7 @@ def demodulate_OFDM_one_symbol_frame(
     mode: str,
     f_min: float,
     f_max: float,
-    subcarrier_delta_f: float# Will have to input this as well as the OFDM frame length - IFFT pt
+    subcarrier_delta_f: float, Nt: int# Will have to input this as well as the OFDM frame length - IFFT pt
 ) -> tuple[list[np.ndarray], list[list[int]], list[np.ndarray]]:
     """
     1. Drift correction via spline interpolation.
@@ -469,6 +514,46 @@ def demodulate_OFDM_one_symbol_frame(
         starts = [idx for idx in sorted_idx[:max_check]
                   if ((idx + full_frame) <= len(col))]
         valid_indices.append(starts)
+        
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+
+
+        # 1) Plot the raw received signal
+        plt.figure(figsize=(8,3))
+        plt.plot(y_t)
+        plt.title('Received OFDM Signal')
+        plt.xlabel('Sample Index')
+        plt.ylabel('Amplitude')
+        plt.tight_layout()
+        plt.savefig(r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\received_signal.png")
+        plt.close()
+
+        # 2) Plot the 10 down-sampled copies in a 5×2 grid
+        fig, axes = plt.subplots(5, 2, figsize=(10,12))
+        for i, col in enumerate(copies):
+            ax = axes.flat[i]
+            ax.plot(col)
+            ax.set_title(f'Copy {i}')
+            ax.set_xlabel('Sample')
+            ax.set_ylabel('Amp')
+        fig.tight_layout()
+        fig.savefig(r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\copies_grid.png", dpi=150)
+        plt.close(fig)
+
+        # 3) Plot the 10 correlation curves in a 5×2 grid
+        fig, axes = plt.subplots(5, 2, figsize=(10,12))
+        for i, corr in enumerate(corr_plots):
+            ax = axes.flat[i]
+            ax.plot(corr)
+            ax.set_title(f'Corr Copy {i}')
+            ax.set_xlabel('Lag')
+            ax.set_ylabel('Correlation')
+        fig.tight_layout()
+        fig.savefig(r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\correlations_grid.png", dpi=150)
+        plt.close(fig)
+
 
     # Step 5: Extract and append payload copies per column
 
@@ -564,6 +649,32 @@ def demodulate_OFDM_one_symbol_frame(
                 best_ber   = ber
                 # Return only the first OFDM symbol copy (first N_data bins)
                 best_first = data_bins[:N_data]
+                
+            import matplotlib
+            matplotlib.use('Agg')   # non-interactive backend so LabVIEW won’t hang
+            import matplotlib.pyplot as plt
+
+            # --- Plot the best constellation ---
+            fig, ax = plt.subplots(figsize=(6, 6))
+
+            # Received points
+            ax.scatter(best_first.real, best_first.imag, s=15, label='Received')
+
+            # Ideal constellation points for reference
+            constellation = get_constellation(mode)
+            ideal = np.array(list(constellation._symbols_to_bits_map.keys()))
+            ax.scatter(ideal.real, ideal.imag, c='black', marker='x', s=50, label='Ideal')
+
+            ax.set_title('Best-BER OFDM Constellation')
+            ax.set_xlabel('In-phase')
+            ax.set_ylabel('Quadrature')
+            ax.grid(True)
+            ax.legend(loc='upper right')
+
+            # Save to your debug folder
+            plot_path = r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\best_constellation.png"
+            fig.savefig(plot_path, dpi=150)
+            plt.close(fig)
 
         if best_first is None:
             return [], []
