@@ -54,21 +54,22 @@ def choose_hyperparameters():
         "d_model": trial.suggest_categorical("d_model", [64, 128, 256]),
         "plot_frequency": batch_size,
         "save_model_frequency": 500,
-        "EARLY_STOP_PATIENCE": 500 // batch_size, 
+        "EARLY_STOP_PATIENCE": 100 // batch_size, 
         "EARLY_STOP_THRESHOLD": 0.5,
         "modulator": 'm5_apsk_constellation',
         "epochs": 125 * batch_size,
         "gain" : 20,
         "dc_offset": 0,
         "optuna_study": study_name,
-        "num_symbols_per_frame" : 4,
+        "num_symbols_per_frame" : 1,
         "scheduler_type": scheduler_type,
         "warmup_steps": warmup_steps,
         "weight_init": trial.suggest_categorical("weight_init", ["xavier", "kaiming", "normal", "default"]),
         "f3dB": 6e6,
         "OFDM_period": 1e4,
-        "num_points_time": 65536,
-        "cnn": trial.suggest_categorical("cnn", [True, False])
+        "num_points_time": 16384,
+        # "cnn": trial.suggest_categorical("cnn", [True, False])
+        "cnn": False
     }
 
 

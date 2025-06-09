@@ -218,6 +218,8 @@ STATE['decoder'] = decoder
 STATE['optimizer'] = optimizer
 STATE['scheduler'] = scheduler
 
+MODELS = ['freq_encoder', "time_encoder", "decoder"]
+
 
 def evm_loss_func(true_symbols, predicted_symbols):
     """
@@ -254,6 +256,7 @@ def run_freq_encoder(real, imag, f_low, f_high, subcarrier_spacing):
     out = STATE['freq_encoder'](x, freqs)
     STATE['freq_encoder_in'] = x[:, k_min:]
     STATE['freq_encoder_out'] = out[:, k_min:] # Remove 0 frequency carriers
+    STATE['encoder_out'] = out[:, k_min:]
     STATE['frequencies'] = data_freqs
     # Store out in STATE to preserve computational graph
 
@@ -273,6 +276,8 @@ def run_time_encoder(real_x_t):
 
     # Now create encoder_out to backprop through pseudochannel
     STATE['encoder_out'] = STATE['time_decoder_out']
+    if STATE['encoder_out'].requires_grad == False:
+        print("Encoder out doesn't have grad!")
     return out.detach().cpu().contiguous().numpy().tolist()
 
 def differentiable_channel(encoder_out: torch.tensor, decoder_in: torch.tensor):
@@ -290,7 +295,9 @@ def differentiable_channel(encoder_out: torch.tensor, decoder_in: torch.tensor):
             return torch.fft.fft(x_flat.reshape(Nt, -1), axis=1)[:Nf]
         return H
     else:
-        return lambda x: x * (decoder_in / encoder_out) # Divide equal sized tensors to get H(jw)
+        def H(x):
+            x * (decoder_in / encoder_out) # Divide equal sized tensors to get H(jw)
+        return H
 
 def run_decoder(real, imag):
     # --- Reshape input to [Nt, Nf] ---
@@ -321,7 +328,7 @@ def update_weights(batch_size=config.batch_size) -> bool:
     '''
     output = False
     STATE['cycle_count'] += 1
-    true_symbols = STATE['encoder_in']
+    true_symbols = STATE['freq_encoder_in']
     predicted_symbols = STATE['decoder_out']
     evm_loss = evm_loss_func(true_symbols, predicted_symbols)
     if evm_loss is not None:
@@ -384,7 +391,7 @@ def update_weights(batch_size=config.batch_size) -> bool:
         wandb.log({"train/lr": lr}, step=step)
         wandb.log({"perf/frame_BER": STATE['frame_BER']}, step=step)
 
-        for model_name in ['encoder', 'decoder']:
+        for model_name in MODELS:
             model = STATE[model_name]
             for name, param in model.named_parameters():
                 # Log weights
@@ -406,7 +413,7 @@ def update_weights(batch_size=config.batch_size) -> bool:
         model_save_dir = os.path.join(script_dir, "..", "saved_models")
         os.makedirs(model_save_dir, exist_ok=True)
 
-        for model_name in ['encoder', 'decoder']:
+        for model_name in MODELS:
             model = STATE[model_name]
             save_path = os.path.join(model_save_dir, f"{model_name}_step{STATE['cycle_count']}.pt")
             torch.save(model.state_dict(), save_path)
@@ -421,12 +428,15 @@ def stop_training():
         # Save models
         model_save_dir = os.path.join(script_dir, "..", "saved_models")
         os.makedirs(model_save_dir, exist_ok=True)
-        encoder_path = os.path.join(model_save_dir, "encoder.pt")
+        freq_encoder_path = os.path.join(model_save_dir, "freq_encoder.pt")
+        time_encoder_path = os.path.join(model_save_dir, "time_encoder.pt")
         decoder_path = os.path.join(model_save_dir, "decoder.pt")
-        torch.save(STATE['encoder'].state_dict(), encoder_path)
+        torch.save(STATE['freq_encoder'].state_dict(), freq_encoder_path)
+        torch.save(STATE['time_encoder'].state_dict(), time_encoder_path)
         torch.save(STATE['decoder'].state_dict(), decoder_path)
         artifact = wandb.Artifact("transformer-models", type="model")
-        artifact.add_file(encoder_path)
+        artifact.add_file(freq_encoder_path)
+        artifact.add_file(time_encoder_path)
         artifact.add_file(decoder_path)
         wandb.log_artifact(artifact)
         wandb.finish()
@@ -444,8 +454,8 @@ def log_constellation(step, freqs=None, evm_loss=-99):
 
     try:
         # Extract data from STATE
-        enc_in = STATE['encoder_in']
-        enc_out = STATE['encoder_out']
+        enc_in = STATE['freq_encoder_in']
+        enc_out = STATE['freq_encoder_out']
         dec_in = STATE['decoder_in']
         dec_out = STATE['decoder_out']
 
@@ -481,7 +491,6 @@ def log_constellation(step, freqs=None, evm_loss=-99):
             ax.set_xlabel("Re")
             ax.set_ylabel("Im")
             ax.grid(True)
-            ax.legend()
 
         # Add a single shared colorbar if using frequency coloring
         if freqs is not None:
@@ -496,6 +505,7 @@ def log_constellation(step, freqs=None, evm_loss=-99):
         fig.savefig(plot_path, dpi=150)
         wandb.log({"Constellation Diagram": wandb.Image(plot_path)}, step=step)
         os.remove(plot_path)
+        plt.close(fig)
 
     except Exception as e:
         print(f"Failed to plot constellation at step {step}: {e}")

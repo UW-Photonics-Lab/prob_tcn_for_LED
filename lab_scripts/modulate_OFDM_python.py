@@ -17,7 +17,7 @@ import torch
 # Get logging
 from lab_scripts.logging_code import *
 
-decode_logger = setup_logger(log_file=r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\decode_bits_log.txt")
+# decode_logger = setup_logger(log_file=r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\decode_bits_log.txt")
 
 
 def get_constellation(mode: str):
@@ -102,9 +102,9 @@ def modulate_data_OFDM(mode: str,
     return encoded_symbol_frame_real, encoded_symbol_frame_imag, grouped_true_bits_list, int(N_data)
 
 
-# AWG_MEMORY_LENGTH = 16384
+AWG_MEMORY_LENGTH = 16384
 # AWG_MEMORY_LENGTH = 105
-AWG_MEMORY_LENGTH = 65536
+# AWG_MEMORY_LENGTH = 65536
 
 BARKER_LENGTH = int(0.01 * (AWG_MEMORY_LENGTH)) if int(0.01 * (AWG_MEMORY_LENGTH)) > 5 else 5
 CP_RATIO = 0
@@ -181,7 +181,7 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
                                      Nt: int) -> list:
     '''Converts received y(t) into a bit string with optional debugging plots'''
 
-    debug_plots = True
+    debug_plots = False
 
     # Define paths for saving logs and plots
     log_dir = r'C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs'
@@ -317,7 +317,7 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
 
         # Step 3: Apply FFT to each symbol and stack into a matrix
         Y_s_matrix = np.array([np.fft.fft(s) for s in symbols])
-        decode_logger.debug(f"Y_s Matrix Shsape: {Y_s_matrix.shape}\n")
+        # decode_logger.debug(f"Y_s Matrix Shsape: {Y_s_matrix.shape}\n")
 
 
         if debug_plots:
@@ -332,7 +332,7 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
 
         # # Extract both positive and negative frequency carriers
         num_data_carriers = N_data
-        decode_logger.debug(f"Number of Carriers: {N_data}\n")
+        # decode_logger.debug(f"Number of Carriers: {N_data}\n")
         # negative_carriers = Y_s[k_min + 1:num_data_carriers + k_min + 1]
         # positive_carriers = Y_s[-num_data_carriers -k_min - 1: -k_min -1]
         # data_subcarriers = negative_carriers
@@ -353,7 +353,7 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
 
         for symbol_fft in Y_s_matrix:
             negative_carriers = symbol_fft[k_min + 1:N_data + k_min + 1]
-            decode_logger.debug(f"Number of Received Carriers: {len(negative_carriers)}\n")
+            # decode_logger.debug(f"Number of Received Carriers: {len(negative_carriers)}\n")
             # Optionally include positive_carriers if your OFDM symbol is Hermitian symmetric
             # positive_carriers = symbol_fft[-num_data_carriers - k_min - 1: -k_min - 1]
 
@@ -368,7 +368,7 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
 
 
         data_subcarriers = np.concatenate(normalized_data_subcarriers)
-        decode_logger.debug(f"Number Total Carriers: {len(data_subcarriers)}\n")
+        # decode_logger.debug(f"Number Total Carriers: {len(data_subcarriers)}\n")
 
         if debug_plots:
             # Plot 6: Constellation Diagram
