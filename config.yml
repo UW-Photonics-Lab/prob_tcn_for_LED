@@ -1,7 +1,7 @@
 EARLY_STOP_PATIENCE: 100
 EARLY_STOP_THRESHOLD: 0.5
 OFDM_period: 10000.0
-batch_size: 16
+batch_size: 1
 cnn: false
 d_model: 64
 dc_offset: 0
@@ -11,12 +11,11 @@ epochs: 10
 f3dB: 6000000.0
 gain: 20
 lr: 0.00118593977395718
-modulator: m5_apsk_constellation
+modulator: qpsk
 nhead: 4
 nlayers: 2
 num_points_time: 16384
 num_symbols_per_frame: 1
-optuna_study: labview_transformer_20250609_113319
 plot_frequency: 1
 save_model_frequency: 500
 scheduler_type: reduce_lr_on_plateu

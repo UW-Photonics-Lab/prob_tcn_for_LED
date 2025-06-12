@@ -42,6 +42,8 @@ else:
 
 # Add a loss accumulator to state
 STATE['loss_accumulator'] = []
+STATE['evm_loss_accumulator'] = [] 
+STATE['embed_loss_accumulator'] = []
 STATE['cycle_count'] = 0
 STATE['batch_count'] = 0
 
@@ -307,13 +309,53 @@ def run_decoder(real, imag):
     STATE['decoder_in'] = x
     
 
-    out =  STATE['decoder'](differentiable_channel(x, STATE['encoder_out'], STATE['decoder_in']))
+    # out =  STATE['decoder'](differentiable_channel(x, STATE['encoder_out'], STATE['decoder_in']))
     # Store out in STATE to preserve computational graph
+    out = STATE['decoder'](x)
     STATE['decoder_in'] = x
     STATE['decoder_out'] = out
     out = out.flatten() # Must flatten along batch dimension to output from labview
     STATE['ML_time'] += (time.time() - start_time)
     return out.real.detach().cpu().contiguous().numpy().tolist(), out.imag.detach().cpu().contiguous().numpy().tolist()
+
+
+# Create network to learn how to embed the channel and
+# the effects of encoder and decoder 
+
+STATE['zeta_mapper'] = None
+
+def zeta_map(encode_symbols: torch.tensor) -> torch.tensor:
+    if STATE['zeta_mapper'] is None:
+        
+        class zeta_nn(torch.nn.Module):
+            def __init__(self, embed_dim = STATE['Nf'] * 10):
+                super().__init__()
+                self.linear1 = nn.Linear(STATE['Nf'] * 2, embed_dim)
+                self.linear2 = nn.Linear(embed_dim, embed_dim)
+            
+            def forward(self, x):
+                x = self.linear1(x)
+                return self.linear2(x)
+            
+        STATE['zeta_mapper'] = zeta_nn()
+
+    x_real = encode_symbols.real.flatten()
+    x_imag = encode_symbols.imag.flatten()
+    x_cat = torch.cat([x_real, x_imag], dim=-1).unsqueeze(0)  # shape [1, 2*Nf]
+    return STATE['zeta_mapper'](x_cat)
+
+def loss_func(true_symbols: torch.tensor, predicted_symbols: torch.tensor, embded_weight=1.0):
+    '''
+    Returns loss
+    '''
+    embedded_transmitted_message = zeta_map(STATE['freq_encoder_out'])
+    embedded_received_message = zeta_map(STATE['decoder_out'])
+
+    embed_term = embded_weight * torch.linalg.norm(embedded_received_message - embedded_transmitted_message) ** 2
+
+    evm_loss = evm_loss_func(STATE['decoder_out'], true_symbols)
+
+    return embed_term + evm_loss, evm_loss, embed_term
 
 
 def update_weights(batch_size=config.batch_size) -> bool:
@@ -328,10 +370,12 @@ def update_weights(batch_size=config.batch_size) -> bool:
     STATE['cycle_count'] += 1
     true_symbols = STATE['freq_encoder_in']
     predicted_symbols = STATE['decoder_out']
-    evm_loss = evm_loss_func(true_symbols, predicted_symbols)
-    if evm_loss is not None:
+    loss, evm_loss, emded_loss = loss_func(true_symbols, predicted_symbols)
+    if loss is not None:
         start_time = time.time()
-        STATE['loss_accumulator'].append(evm_loss)
+        STATE['loss_accumulator'].append(loss)
+        STATE['evm_loss_accumulator'].append(evm_loss)
+        STATE['embed_loss_accumulator'].append(emded_loss)
 
         elapsed_time = time.time() - STATE['start_time']
         # Calculate time for ML parts
@@ -341,6 +385,8 @@ def update_weights(batch_size=config.batch_size) -> bool:
         if len(STATE['loss_accumulator']) == batch_size:
             STATE['batch_count'] += 1
             batch_avg_loss = torch.mean(torch.stack(STATE['loss_accumulator']))
+            batch_avg_evm_loss = torch.mean(torch.stack(STATE['evm_loss_accumulator']))
+            batch_avg_embed_loss = torch.mean(torch.stack(STATE['embed_loss_accumulator']))
             if config.scheduler_type == "reduce_lr_on_plateu":
                 scheduler.step(batch_avg_loss)
             elif config.scheduler_type == "warmup":
@@ -348,6 +394,8 @@ def update_weights(batch_size=config.batch_size) -> bool:
 
             # Track with WandB
             wandb.log({"train/loss" :batch_avg_loss.item()}, step=STATE['cycle_count'])
+            wandb.log({"train/evm_loss" :batch_avg_evm_loss.item()}, step=STATE['cycle_count'])
+            wandb.log({"train/embed_loss" :batch_avg_embed_loss.item()}, step=STATE['cycle_count'])
             STATE['optimizer'].zero_grad()
             batch_avg_loss.backward()
             STATE['optimizer'].step()

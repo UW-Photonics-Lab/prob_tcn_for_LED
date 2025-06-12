@@ -32,7 +32,6 @@ def choose_hyperparameters():
         f.write(str(trial.number))
 
     batch_size = trial.suggest_categorical("batch_size", [1, 8, 16, 32])
-    batch_size = 1
 
     '''
     Modulators:
@@ -40,10 +39,14 @@ def choose_hyperparameters():
     qpsk
 
     '''
-    epochs = 10 * batch_size
+    epochs = 150 * batch_size
     warmup_ratio = trial.suggest_float("warmup_ratio", 0.0, 0.2)
     warmup_steps = int(warmup_ratio * epochs)
-    scheduler_type = trial.suggest_categorical("scheduler_type", ['warmup', 'reduce_lr_on_plateu'])
+    # scheduler_type = trial.suggest_categorical("scheduler_type", ['warmup', 'reduce_lr_on_plateu'])
+    scheduler_type = "reduce_lr_on_plateu"
+
+    # weight_init = trial.suggest_categorical("weight_init", ["xavier", "kaiming", "normal", "default"])
+    weight_init = "default"
 
     config = {
         "lr": trial.suggest_float("lr", 1e-4, 1e-2, log=True),
@@ -65,7 +68,7 @@ def choose_hyperparameters():
         "num_symbols_per_frame" : 1,
         "scheduler_type": scheduler_type,
         "warmup_steps": warmup_steps,
-        "weight_init": trial.suggest_categorical("weight_init", ["xavier", "kaiming", "normal", "default"]),
+        "weight_init": weight_init,
         "f3dB": 6e6,
         "OFDM_period": 1e4,
         "num_points_time": 16384,

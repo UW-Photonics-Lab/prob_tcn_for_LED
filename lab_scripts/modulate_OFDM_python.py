@@ -107,7 +107,7 @@ AWG_MEMORY_LENGTH = 16384
 # AWG_MEMORY_LENGTH = 65536
 
 BARKER_LENGTH = int(0.01 * (AWG_MEMORY_LENGTH)) if int(0.01 * (AWG_MEMORY_LENGTH)) > 5 else 5
-CP_RATIO = 0
+CP_RATIO = 0.25
 def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: list[list[float]], cyclic_prefix_length: int) -> list[float]:
     '''Takes a symbol frame matrix and converts and x(t) frame matrix
 
@@ -123,11 +123,12 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
     N_t = symbol_groups.shape[0]
     barker_code = np.array([1, -1, 1, -1, 1], dtype=float)
     barker_code = np.repeat(barker_code, BARKER_LENGTH // len(barker_code)) # Set as 1%
-    IFFT_LENGTH = int((AWG_MEMORY_LENGTH - len(barker_code)) // N_t) 
+    # IFFT_LENGTH = int((AWG_MEMORY_LENGTH - len(barker_code)) // N_t) 
 
     '''CP'''
-    IFFT_LENGTH = int((AWG_MEMORY_LENGTH - len(barker_code)) // (N_t * (1 + CP_RATIO)))
-    cyclic_prefix_length = int(IFFT_LENGTH * CP_RATIO)
+    SYMBOL_LENGTH = int((AWG_MEMORY_LENGTH - len(barker_code)) / N_t)
+    IFFT_LENGTH = int(SYMBOL_LENGTH * (1 - CP_RATIO))
+    cyclic_prefix_length = int(SYMBOL_LENGTH * CP_RATIO)
 
     # Add DC offset, Nyquist carrier, and conjugate symmetry
     symbol_groups_conjugate_flipped = np.conj(symbol_groups)[:, ::-1] # Flip along axis=1
@@ -284,38 +285,22 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
         # decode_logger.debug(f"Frame length: {len(frame_y_t)}\n")
         # points_per_symbol = int(len(frame_y_t) / Nt)
 
-
-        # symbols = []
-        # for i in range(Nt):
-        #     start = i * points_per_symbol
-        #     end = start + points_per_symbol
-        #     symbol = frame_y_t[start:end]
-        #     symbols.append(symbol)
-
         frame_y_t = np.array(frames[0])
         frame_len = len(frame_y_t)
         symbol_len = frame_len // Nt
         CP_length = int(symbol_len * CP_RATIO)
-        fft_len = symbol_len - CP_length
 
         # Target sample centers for each symbol
         symbols = []
         for i in range(Nt):
-            # start = i * symbol_len
-            # end = (i + 1) * symbol_len
-
-            # New: account for CP
             start = i * symbol_len
             end = start + symbol_len
 
-            # Create fractional indices for the symbol interval
-            x_interp = np.linspace(start + CP_length, end, num=int(np.round(fft_len)), endpoint=False)
-
-            # Interpolate at fractional positions
-            symbol = np.interp(x_interp, np.arange(frame_len), frame_y_t)
+            symbol_with_cp = frame_y_t[start:end]
+            symbol = symbol_with_cp[CP_length:]
             symbols.append(symbol)
 
-        # Step 3: Apply FFT to each symbol and stack into a matrix
+        # Apply FFT to each symbol and stack into a matrix
         Y_s_matrix = np.array([np.fft.fft(s) for s in symbols])
         # decode_logger.debug(f"Y_s Matrix Shsape: {Y_s_matrix.shape}\n")
 
