@@ -104,7 +104,7 @@ def modulate_data_OFDM(mode: str,
 AWG_MEMORY_LENGTH = 65536
 
 BARKER_LENGTH = int(0.01 * (AWG_MEMORY_LENGTH)) if int(0.01 * (AWG_MEMORY_LENGTH)) > 5 else 5
-CP_RATIO = 0
+CP_RATIO = 0.25
 def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: list[list[float]], cyclic_prefix_length: int) -> list[float]:
     '''Takes a symbol frame matrix and converts and x(t) frame matrix
 
@@ -136,6 +136,10 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
     # x_t_groups = np.real(np.fft.ifft(full_symbols, axis=1, n=IFFT_LENGTH))
 
     '''CP'''
+    
+    SYMBOL_LENGTH = int((AWG_MEMORY_LENGTH - len(barker_code)) / N_t)
+    IFFT_LENGTH = int(SYMBOL_LENGTH * (1 - CP_RATIO))
+    cyclic_prefix_length = int(SYMBOL_LENGTH * CP_RATIO)
     x_t_no_cp = np.real(np.fft.ifft(full_symbols, axis=1, n=IFFT_LENGTH))
 
     # Add cyclic prefix per symbol
@@ -305,11 +309,14 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
             start = i * symbol_len
             end = start + symbol_len
 
-            # Create fractional indices for the symbol interval
-            x_interp = np.linspace(start + CP_length, end, num=int(np.round(fft_len)), endpoint=False)
+            symbol_with_cp = frame_y_t[start:end]
+            symbol = symbol_with_cp[CP_length:]
 
-            # Interpolate at fractional positions
-            symbol = np.interp(x_interp, np.arange(frame_len), frame_y_t)
+            # Create fractional indices for the symbol interval
+            # x_interp = np.linspace(start + CP_length, end, num=int(np.round(fft_len)), endpoint=False)
+
+            # # Interpolate at fractional positions
+            # symbol = np.interp(x_interp, np.arange(frame_len), frame_y_t)
             symbols.append(symbol)
 
         # Step 3: Apply FFT to each symbol and stack into a matrix

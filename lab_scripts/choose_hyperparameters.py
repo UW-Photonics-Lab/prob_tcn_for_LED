@@ -39,7 +39,7 @@ def choose_hyperparameters():
     qpsk
 
     '''
-    epochs = 125 * batch_size
+    epochs = 200 * batch_size
     warmup_ratio = trial.suggest_float("warmup_ratio", 0.0, 0.2)
     warmup_steps = int(warmup_ratio * epochs)
     scheduler_type = trial.suggest_categorical("scheduler_type", ['warmup', 'reduce_lr_on_plateu'])

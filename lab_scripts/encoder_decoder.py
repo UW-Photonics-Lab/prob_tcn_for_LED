@@ -266,6 +266,11 @@ def update_weights(batch_size=config.batch_size) -> bool:
             # Clear accumulator
             STATE['loss_accumulator'].clear()
 
+            if config.scheduler_type == "reduce_lr_on_plateu":
+                STATE['scheduler'].step(batch_avg_loss)
+            else:
+                STATE['scheduler'].step()
+
             # Save final loss so that optuna can use it later
             with open("final_loss.txt", "w") as f:
                     f.write(str(batch_avg_loss.item()))
@@ -290,29 +295,6 @@ def update_weights(batch_size=config.batch_size) -> bool:
                     )
                     print(msg)
                     output = True
-                
-        
-    
-
-    # if STATE['cycle_count'] % config.plot_frequency == 0:
-    #     log_constellation(step=STATE['cycle_count'], freqs=STATE['frequencies'], evm_loss=evm_loss)
-
-    #     lr = optimizer.param_groups[0]["lr"]
-    #     wandb.log({"train/lr": lr}, step=STATE['cycle_count'])
-    #     wandb.log({"perf/frame_BER": STATE['frame_BER']}, step=STATE['cycle_count'])
-
-    #     for model_name in ['encoder', 'decoder']:
-    #         model = STATE[model_name]
-    #         for name, param in model.named_parameters():
-    #             wandb.log({f"weights/{model_name}/{name}": wandb.Histogram(param.data.cpu())}, step=STATE['cycle_count'])
-    #             if param.grad is not None:
-    #                 wandb.log({f"grads/{model_name}/{name}": wandb.Histogram(param.grad.cpu())}, step=STATE['cycle_count'])
-
-    #             else:
-    #                 if len(STATE['loss_accumulator']) == batch_size:
-    #                     print("Gradient is None Incorrectly!")
-    #             wandb.log({f"param_norms/{model_name}/{name}": torch.norm(param).item()}, step=STATE['cycle_count'])
-
 
     if STATE['cycle_count'] % config.plot_frequency == 0:
         step = STATE['cycle_count']
@@ -369,9 +351,6 @@ def stop_training():
         artifact.add_file(decoder_path)
         wandb.log_artifact(artifact)
         wandb.finish()
-
-
-
 
 def log_constellation(step, freqs=None, evm_loss=-99):
     """

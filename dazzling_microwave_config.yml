@@ -1,0 +1,17 @@
+EARLY_STOP_PATIENCE: 500
+EARLY_STOP_THRESHOLD: 0.5
+batch_size: 16
+d_model: 64
+dc_offset: 0
+dim_feedforward: 128
+dropout: 0.08057083615921015
+gain: 20
+lr: 0.00118593977395718
+modulator: m5_apsk_constellation
+nhead: 4
+nlayers: 2
+num_symbols_per_frame: 1
+plot_frequency: 16
+save_model_frequency: 500
+scheduler_type: reduce_lr_on_plateu
+weight_init: default
