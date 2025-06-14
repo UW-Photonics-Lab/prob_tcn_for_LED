@@ -211,8 +211,16 @@ def run_encoder(real, imag, f_low, f_high, subcarrier_spacing):
     STATE['ML_time'] += (time.time() - start_time)
     return out.real.detach().cpu().numpy().tolist(), out.imag.detach().cpu().numpy().tolist()
 
-def differentiable_channel(encoder_out: torch.tensor, received_symbols: torch.tensor):
-    return received_symbols / encoder_out # Divide equal sized tensors to get H(jw)
+def differentiable_channel(encoder_out: torch.tensor, received_symbols: torch.tensor, type='linear'):
+    if type == 'linear':
+        return received_symbols / encoder_out # Divide equal sized tensors to get H(jw)
+    elif type == 'ici_matrix':
+        regularization_constant = 1e-4
+        regularization_matrix = torch.eye(STATE['Nt']) * regularization_constant
+        gram_matrix = encoder_out @ encoder_out.t() # [Nt, Nt]
+        inverse_term = torch.linalg.inv(gram_matrix + regularization_matrix)
+        H_k = received_symbols @ encoder_out.t() @ inverse_term # [Nt, Nt]
+        return H_k @ encoder_out # [Nt, Nt] @ [Nt, Nf] -> [Nt, Nf]
 
 def run_decoder(real, imag):
     # --- Reshape input to [Nt, Nf] ---
@@ -221,7 +229,7 @@ def run_decoder(real, imag):
     real = torch.tensor(real, dtype=torch.float32, device=device).reshape(Nt, Nf)
     imag = torch.tensor(imag, dtype=torch.float32, device=device).reshape(Nt, Nf)
     x = real + 1j * imag
-    STATE['H_channel'] = differentiable_channel(x, STATE['encoder_out'])
+    STATE['H_channel'] = differentiable_channel(x, STATE['encoder_out'], type='ici_matrix')
 
     out =  STATE['decoder'](STATE['H_channel'] * STATE['encoder_out'])
     # Store out in STATE to preserve computational graph
@@ -298,6 +306,12 @@ def update_weights(batch_size=config.batch_size) -> bool:
 
     if STATE['cycle_count'] % config.plot_frequency == 0:
         step = STATE['cycle_count']
+        # Compute EVM grid (per symbol, per subcarrier)
+        evm_grid = (true_symbols.real - predicted_symbols.real) ** 2 + (true_symbols.imag - predicted_symbols.imag) ** 2
+        evm_grid = evm_grid.detach().cpu().numpy()  # Convert to numpy for plotting
+
+        # Call the heatmap plot function
+        plot_evm_heatmap(evm_grid, step=STATE['cycle_count'])
 
         log_constellation(step=step, freqs=STATE['frequencies'], evm_loss=evm_loss)
 
@@ -352,6 +366,39 @@ def stop_training():
         wandb.log_artifact(artifact)
         wandb.finish()
 
+
+def plot_evm_heatmap(evms: np.ndarray, step: int = 0, save_path: str = None):
+    """
+    Plots a heatmap of EVM loss for an [Nt, Nf] grid.
+    Green = low loss, Red = high loss.
+    """
+    try:
+        Nt, Nf = evms.shape
+        fig, ax = plt.subplots(figsize=(10, 4))
+        cmap = plt.get_cmap('RdYlGn_r')  # reversed so green is low, red is high
+        im = ax.imshow(evms, aspect='auto', cmap=cmap, interpolation='nearest', origin='upper')
+        fig.colorbar(im, ax=ax, label='EVM Loss')
+        ax.set_title(f"EVM Loss Heatmap @ Step {step}")
+        ax.set_xlabel("Subcarrier (Nf)")
+        ax.set_ylabel("OFDM Symbol (Nt)")
+
+        # Set y-axis to integer bins
+        ax.set_yticks(np.arange(Nt))
+        ax.set_ylim(Nt-0.5, -0.5)  # So 0 is at the top, Nt-1 at the bottom
+
+        # No tight_layout if using constrained_layout elsewhere
+        if save_path is not None:
+            fig.savefig(save_path, dpi=150)
+        os.makedirs("wandb_constellations", exist_ok=True)
+        plot_path = f"wandb_constellations/ofdm_grid_step_{step}.png"
+        fig.savefig(plot_path, dpi=150)
+        wandb.log({"OFDM Grid": wandb.Image(plot_path)}, step=step)
+        os.remove(plot_path)
+        plt.close(fig)
+    except Exception as e:
+        print(f"Failed to plot constellation grid at step {step}: {e}")
+
+
 def log_constellation(step, freqs=None, evm_loss=-99):
     """
     Logs a 2x2 subplot showing encoder/decoder constellations.
@@ -360,8 +407,8 @@ def log_constellation(step, freqs=None, evm_loss=-99):
     - Frequency-colored constellation points (if freqs provided).
     """
 
-    fig, axs = plt.subplots(2, 2, figsize=(10, 8))
-    fig.suptitle(f"Constellation Flow @ Step {step}", fontsize=14)
+    fig, axs = plt.subplots(2, 2, figsize=(10, 8), constrained_layout=True)
+    fig.suptitle(f"Constellation Flow Symbol 1 @ Step {step}", fontsize=14)
 
     try:
         # Extract data from STATE
@@ -393,16 +440,15 @@ def log_constellation(step, freqs=None, evm_loss=-99):
 
         for ax, (label, symbols) in zip(axs.flat, data.items()):
             if point_colors is not None and len(symbols) == len(point_colors):
-                scatter = ax.scatter(symbols.real, symbols.imag, s=8, c=point_colors,label=label)
+                ax.scatter(symbols.real, symbols.imag, s=8, c=point_colors,label=label)
             else:
-                scatter = ax.scatter(symbols.real, symbols.imag, s=8, alpha=0.8, label=label)
+                ax.scatter(symbols.real, symbols.imag, s=8, alpha=0.8, label=label)
 
             ax.scatter(enc_in_np.real, enc_in_np.imag, s=20, c='gray', marker='x', label='Encoder Input')
             ax.set_title(label)
             ax.set_xlabel("Re")
             ax.set_ylabel("Im")
             ax.grid(True)
-            ax.legend()
 
         # Add a single shared colorbar if using frequency coloring
         if freqs is not None:
@@ -411,6 +457,8 @@ def log_constellation(step, freqs=None, evm_loss=-99):
             sm.set_array([])
             cbar = fig.colorbar(sm, ax=axs, orientation='vertical', fraction=0.02, pad=0.02)
             cbar.set_label("Carrier Frequency (Hz)")
+
+        # fig.tight_layout(rect=[0, 0, 1, 0.95]) 
 
         os.makedirs("wandb_constellations", exist_ok=True)
         plot_path = f"wandb_constellations/constellation_step_{step}.png"

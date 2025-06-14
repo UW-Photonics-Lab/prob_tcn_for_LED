@@ -64,7 +64,8 @@ def choose_hyperparameters():
         "num_symbols_per_frame" : 4,
         "scheduler_type": scheduler_type,
         "warmup_steps": warmup_steps,
-        "weight_init": trial.suggest_categorical("weight_init", ["xavier", "kaiming", "normal"])
+        "weight_init": trial.suggest_categorical("weight_init", ["xavier", "kaiming", "normal"]),
+        "CP_ratio": 0.25
     }
 
 
