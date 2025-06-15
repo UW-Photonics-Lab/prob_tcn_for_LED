@@ -30,7 +30,7 @@ print(f"  Name: {wandb.run.name}")
 print(f"  ID: {wandb.run.id}")
 print(f"  URL: {wandb.run.url}")
 print("Chosen hyperparameters for this session:")
-pprint.pprint(config)  
+pprint.pprint(config)
 
 # Set device
 if torch.cuda.is_available():
@@ -42,6 +42,8 @@ else:
 
 # Add a loss accumulator to state
 STATE['loss_accumulator'] = []
+STATE['predicted_received_symbols'] = []
+STATE['received_symbols'] = []
 STATE['cycle_count'] = 0
 STATE['batch_count'] = 0
 
@@ -220,6 +222,11 @@ def differentiable_channel(encoder_out: torch.tensor, received_symbols: torch.te
         gram_matrix = encoder_out @ encoder_out.t() # [Nt, Nt]
         inverse_term = torch.linalg.inv(gram_matrix + regularization_matrix)
         H_k = received_symbols @ encoder_out.t() @ inverse_term # [Nt, Nt]
+
+        # Use this information to get SNR vs Freq information
+        predicted_received_symbols = H_k @ encoder_out
+        STATE['predicted_received_symbols'].append(predicted_received_symbols)
+        STATE['received_symbols'].append(encoder_out)
         return H_k @ encoder_out # [Nt, Nt] @ [Nt, Nf] -> [Nt, Nf]
 
 def run_decoder(real, imag):
@@ -245,8 +252,8 @@ def update_weights(batch_size=config.batch_size) -> bool:
 
     Returns:
         cancel_early: bool flags whether to stop current training session
-    
-    
+
+
     '''
     output = False
     STATE['cycle_count'] += 1
@@ -260,7 +267,7 @@ def update_weights(batch_size=config.batch_size) -> bool:
         elapsed_time = time.time() - STATE['start_time']
         # Calculate time for ML parts
         STATE['ML_time'] += (time.time() - start_time)
-        
+
         # Push plots to wand
         if len(STATE['loss_accumulator']) == batch_size:
             STATE['batch_count'] += 1
@@ -282,15 +289,15 @@ def update_weights(batch_size=config.batch_size) -> bool:
             # Save final loss so that optuna can use it later
             with open("final_loss.txt", "w") as f:
                     f.write(str(batch_avg_loss.item()))
-            
-            
+
+
             wandb.log({"perf/time_for_ML": STATE['ML_time']}, step=STATE['cycle_count'])
             wandb.log({"perf/time_encode_to_decode": elapsed_time}, step=STATE['cycle_count'])
             # Percentage ML time
             wandb.log({"perf/percent_time_for_ML": STATE['ML_time'] / elapsed_time}, step=STATE['cycle_count'])
 
             # Check if need to cancel run early
-            
+
             if STATE['batch_count'] > config.EARLY_STOP_PATIENCE:
 
                 if batch_avg_loss > config.EARLY_STOP_THRESHOLD:
@@ -314,6 +321,8 @@ def update_weights(batch_size=config.batch_size) -> bool:
         plot_evm_heatmap(evm_grid, step=STATE['cycle_count'])
 
         log_constellation(step=step, freqs=STATE['frequencies'], evm_loss=evm_loss)
+
+        plot_SNR_vs_freq(step=step)
 
         lr = optimizer.param_groups[0]["lr"]
         wandb.log({"train/lr": lr}, step=step)
@@ -365,6 +374,62 @@ def stop_training():
         artifact.add_file(decoder_path)
         wandb.log_artifact(artifact)
         wandb.finish()
+
+
+def plot_SNR_vs_freq(step: int, save_path: str = None):
+
+    try:
+        # Get frequencies
+        data_frequencies = STATE['frequencies']
+
+        # Get sent and received symbols
+        received_symbols = torch.tensor(STATE['received_symbols'])
+        received_symbols = torch.stack(received_symbols, dim=0) # [k, Nt, Nf]
+        predicted_symbols = torch.tensor(STATE['predicted_received_symbols'])
+        predicted_symbols = torch.stack(predicted_symbols, dim=0) # [k, Nt, Nf]
+
+        # Create large tensors of shape [Nt * k, Nf]
+        # Collapse k and Nt -> shape becomes [k * Nt, Nf]
+        received_symbols = received_symbols.reshape(-1, received_symbols.shape[-1])  # [k * Nt, Nf]
+        predicted_symbols = predicted_symbols.reshape(-1, predicted_symbols.shape[-1])  # [k * Nt, Nf]
+
+        # Calculate EVM by freq
+        evm_by_freq = torch.mean(torch.square(torch.abs(received_symbols - predicted_symbols)), axis=0) # [Nf]
+        assert len(data_frequencies) == len(evm_by_freq)
+
+        snr_by_freq = 1 / (evm_by_freq ** 2 + 1e-8)
+
+        # Now, calculate integral of SNR over freq ot get information bandwidth
+        freqs = np.array(freqs)
+        snr_by_freq = np.array(snr_by_freq)
+
+        integrated_snr = np.trapz(snr_by_freq, freqs)
+        bandwidth = freqs[-1] - freqs[0]
+        mean_snr = integrated_snr / bandwidth
+        C_total = np.trapz(np.log2(1 + snr_by_freq), data_frequencies)
+
+        # Plot SNR vs Frequency
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.plot(data_frequencies, snr_by_freq.cpu().numpy(), marker='o', linestyle='-')
+        ax.set_title(f"SNR vs Frequency @ Step {step} | Mean SNR {mean_snr: .2f} | Estimated C {C_total: .2f}")
+        ax.set_xlabel("Frequency (Hz)")
+        ax.set_ylabel("SNR (Linear Scale)")
+        ax.grid(True)
+
+        # Save and log
+        if save_path is not None:
+            fig.savefig(save_path, dpi=150)
+
+        os.makedirs("wandb_constellations", exist_ok=True)
+        plot_path = f"wandb_constellations/snr_freq_step_{step}.png"
+        fig.savefig(plot_path, dpi=150)
+        wandb.log({"SNR vs Frequency": wandb.Image(plot_path)}, step=step)
+        os.remove(plot_path)
+        plt.close(fig)
+
+    except Exception as e:
+        print(f"Failed to plot SNR vs Frequency at step {step}: {e}")
+
 
 
 def plot_evm_heatmap(evms: np.ndarray, step: int = 0, save_path: str = None):
@@ -458,7 +523,7 @@ def log_constellation(step, freqs=None, evm_loss=-99):
             cbar = fig.colorbar(sm, ax=axs, orientation='vertical', fraction=0.02, pad=0.02)
             cbar.set_label("Carrier Frequency (Hz)")
 
-        # fig.tight_layout(rect=[0, 0, 1, 0.95]) 
+        # fig.tight_layout(rect=[0, 0, 1, 0.95])
 
         os.makedirs("wandb_constellations", exist_ok=True)
         plot_path = f"wandb_constellations/constellation_step_{step}.png"
