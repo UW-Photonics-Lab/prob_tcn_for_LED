@@ -13,6 +13,7 @@ import matplotlib.colors as colors
 import time
 import pprint
 from transformers import get_linear_schedule_with_warmup
+import traceback
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 config_path = os.path.join(script_dir, "..", "config.yml")
@@ -226,7 +227,7 @@ def differentiable_channel(encoder_out: torch.tensor, received_symbols: torch.te
         # Use this information to get SNR vs Freq information
         predicted_received_symbols = H_k @ encoder_out
         STATE['predicted_received_symbols'].append(predicted_received_symbols)
-        STATE['received_symbols'].append(encoder_out)
+        STATE['received_symbols'].append(received_symbols)
         return H_k @ encoder_out # [Nt, Nt] @ [Nt, Nf] -> [Nt, Nf]
 
 def run_decoder(real, imag):
@@ -383,9 +384,9 @@ def plot_SNR_vs_freq(step: int, save_path: str = None):
         data_frequencies = STATE['frequencies']
 
         # Get sent and received symbols
-        received_symbols = torch.tensor(STATE['received_symbols'])
+        received_symbols = STATE['received_symbols']
         received_symbols = torch.stack(received_symbols, dim=0) # [k, Nt, Nf]
-        predicted_symbols = torch.tensor(STATE['predicted_received_symbols'])
+        predicted_symbols = STATE['predicted_received_symbols']
         predicted_symbols = torch.stack(predicted_symbols, dim=0) # [k, Nt, Nf]
 
         # Create large tensors of shape [Nt * k, Nf]
@@ -394,26 +395,34 @@ def plot_SNR_vs_freq(step: int, save_path: str = None):
         predicted_symbols = predicted_symbols.reshape(-1, predicted_symbols.shape[-1])  # [k * Nt, Nf]
 
         # Calculate EVM by freq
-        evm_by_freq = torch.mean(torch.square(torch.abs(received_symbols - predicted_symbols)), axis=0) # [Nf]
+        
+        num = torch.mean(torch.square(torch.abs(received_symbols - predicted_symbols)), dim=0) # [Nf]
+        denom = torch.mean(torch.square(torch.abs(predicted_symbols)), dim=0)
+        evm_by_freq = num / denom
         assert len(data_frequencies) == len(evm_by_freq)
 
         snr_by_freq = 1 / (evm_by_freq ** 2 + 1e-8)
+        snr_by_freq_dB = 10 * torch.log10(snr_by_freq + 1e-8)
+        snr_by_freq_dB = snr_by_freq_dB.detach().cpu().numpy()
 
         # Now, calculate integral of SNR over freq ot get information bandwidth
+        freqs = data_frequencies.detach().cpu().numpy()
+        snr_by_freq = snr_by_freq.detach().cpu().numpy()
         freqs = np.array(freqs)
         snr_by_freq = np.array(snr_by_freq)
 
         integrated_snr = np.trapz(snr_by_freq, freqs)
         bandwidth = freqs[-1] - freqs[0]
         mean_snr = integrated_snr / bandwidth
-        C_total = np.trapz(np.log2(1 + snr_by_freq), data_frequencies)
+        mean_snr_dB = 10 * np.log10(mean_snr)
+        C_total = np.trapz(np.log2(1 + snr_by_freq), freqs)
 
         # Plot SNR vs Frequency
         fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(data_frequencies, snr_by_freq.cpu().numpy(), marker='o', linestyle='-')
-        ax.set_title(f"SNR vs Frequency @ Step {step} | Mean SNR {mean_snr: .2f} | Estimated C {C_total: .2f}")
+        ax.plot(freqs, snr_by_freq_dB, marker='o', linestyle='-')
+        ax.set_title(f"SNR vs Frequency @ Step {step} | Mean SNR (dB) {mean_snr_dB: .2f} | Estimated C {C_total: .3e}")
         ax.set_xlabel("Frequency (Hz)")
-        ax.set_ylabel("SNR (Linear Scale)")
+        ax.set_ylabel("SNR (Log Scale dB)")
         ax.grid(True)
 
         # Save and log
@@ -429,6 +438,8 @@ def plot_SNR_vs_freq(step: int, save_path: str = None):
 
     except Exception as e:
         print(f"Failed to plot SNR vs Frequency at step {step}: {e}")
+        traceback.print_exc()
+        
 
 
 
