@@ -39,34 +39,41 @@ def choose_hyperparameters():
     qpsk
 
     '''
-    epochs = 200 * batch_size
-    warmup_ratio = trial.suggest_float("warmup_ratio", 0.0, 0.2)
-    warmup_steps = int(warmup_ratio * epochs)
-    scheduler_type = trial.suggest_categorical("scheduler_type", ['warmup', 'reduce_lr_on_plateu'])
+    epochs = 300 * batch_size
+    scheduler_type = trial.suggest_categorical("scheduler_type", ['reduce_lr_on_plateu'])
 
     config = {
         "lr": trial.suggest_float("lr", 1e-4, 1e-2, log=True),
         "nhead": trial.suggest_categorical("nhead", [2, 4, 8]),
         "nlayers": trial.suggest_int("nlayers", 2, 6),
-        "dim_feedforward": trial.suggest_categorical("dim_feedforward", [128, 256, 512]),
+        "dim_feedforward": trial.suggest_categorical("dim_feedforward", [64, 128, 256, 512]),
         "batch_size": batch_size,
         "dropout": trial.suggest_float("dropout", 0.0, 0.3),
         "d_model": trial.suggest_categorical("d_model", [64, 128, 256]),
         "plot_frequency": batch_size,
         "save_model_frequency": 500,
-        "EARLY_STOP_PATIENCE": 200 // batch_size, 
+        "EARLY_STOP_PATIENCE": 300 // batch_size, 
         "EARLY_STOP_THRESHOLD": 0.5,
         "modulator": 'm5_apsk_constellation',
         "epochs": 125 * batch_size,
         "gain" : 20,
         "dc_offset": 0,
         "optuna_study": study_name,
-        "num_symbols_per_frame" : 4,
+        "num_symbols_per_frame" : 1,
         "scheduler_type": scheduler_type,
-        "warmup_steps": warmup_steps,
-        "weight_init": trial.suggest_categorical("weight_init", ["xavier", "kaiming", "normal"]),
-        "CP_ratio": 0.25
+        "weight_init": trial.suggest_categorical("weight_init", ["xavier", "kaiming", "normal", "default"]),
+        "CP_ratio": 0.25,
+        "channel_derivative_type": trial.suggest_categorical("channel_derivative_type", ["ici_matrix", "linear"]),
+        # "pre_layer_norm": trial.suggest_categorical("pre_layer_norm", [True, False]),
+        "pre_layer_norm": False,
+        "ici_window_length": 370
     }
+
+    if config["scheduler_type"] == "warmup":
+         config["warmup_steps"] = trial.suggest_int("warmup_steps", 0, int(0.2 * epochs))
+
+    if config["channel_derivative_type"] == "ici_matrix":
+         config['matrix_regularization'] = trial.suggest_float("matrix_regularization", 1e-6, 1e-3, log=True)
 
 
     script_dir = os.path.dirname(os.path.abspath(__file__))

@@ -7,8 +7,11 @@ from abc import ABC, abstractmethod
 class ConstellationDiagram(ABC):
 
     def __init__(self, complex_symbols: np.array):
-        self._complex_symbols = complex_symbols
-        self._symbols_to_bits_map = self._generate_bit_map(complex_symbols)
+        # Normalize to unit average power
+        avg_power = np.mean(np.abs(complex_symbols) ** 2)
+        normalized_symbols = complex_symbols / np.sqrt(avg_power)
+        self._complex_symbols = normalized_symbols
+        self._symbols_to_bits_map = self._generate_bit_map(self._complex_symbols)
     
     @abstractmethod
     def _generate_bit_map(self, complex_symbols: np.array) -> dict[complex, str]:

@@ -47,6 +47,8 @@ STATE['predicted_received_symbols'] = []
 STATE['received_symbols'] = []
 STATE['cycle_count'] = 0
 STATE['batch_count'] = 0
+STATE['encoder_out_buffer'] = [] 
+STATE['decoder_in_buffer'] = []
 
 class FrequencyPositionalEmbedding(nn.Module):
     def __init__(self, d_model):
@@ -72,8 +74,9 @@ class FrequencyPositionalEmbedding(nn.Module):
             torch.arange(0, self.d_model, 2, device=device) * -np.log(1e4) / self.d_model
             ).unsqueeze(0).unsqueeze(0) # [1, 1, d_model//2]
         pe = torch.zeros(B, N, self.d_model).to(device)
-        freq = freq.unsqueeze(-1) # [B, N, 1]
-        angles = div_term * freq # [B, N, dmodel//2]
+        freq = freq.unsqueeze(-1) # [B, Nf, 1]
+        # print("Frequencies", freq)
+        angles = div_term * freq # [B, Nf, dmodel//2]
         pe[:, :, 0::2] = torch.sin(angles)
         pe[:, :, 1::2] = torch.cos(angles)
         x = x + pe[:x.size(0)]
@@ -99,12 +102,13 @@ class TransformerEncoder(nn.Module):
         super().__init__()
         self.frequency_embed = FrequencyPositionalEmbedding(d_model)
         self.symbol_embed = SymbolEmbedding(d_model)
-        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward=dim_feedforward, batch_first=True, dropout=dropout, norm_first=True)
+        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward=dim_feedforward, batch_first=True, dropout=dropout, norm_first=config.pre_layer_norm)
         self.transformer = nn.TransformerEncoder(encoder_layer, nlayers)
         self.output = nn.Linear(d_model, 2)
 
     def forward(self, x: torch.tensor, freqs: torch.tensor) -> torch.tensor:
         embedded_symbols = self.symbol_embed(x) # [B, N, d_model]
+        # print("Before freq:", freqs)
         freq_embedded_symbols = self.frequency_embed(embedded_symbols, freqs) # [B, N, d_model]
         out = self.transformer(freq_embedded_symbols) # [B, N, d_model]
         out = self.output(out) #[B, N, 2]
@@ -114,7 +118,7 @@ class TransformerDecoder(nn.Module):
     def __init__(self, d_model, nhead, nlayers, dim_feedforward, dropout):
         super().__init__()
         self.sym_embed = SymbolEmbedding(d_model)
-        decoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward=dim_feedforward, batch_first=True, dropout=dropout, norm_first=True)
+        decoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward=dim_feedforward, batch_first=True, dropout=dropout, norm_first=config.pre_layer_norm)
         self.transformer = nn.TransformerEncoder(decoder_layer, nlayers)
         self.output = nn.Linear(d_model, 2)
 
@@ -158,7 +162,7 @@ apply_weight_init(decoder, config.weight_init)
 
 optimizer = optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=float(config.lr))
 if config.scheduler_type == "reduce_lr_on_plateu":
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10, min_lr=1e-6)
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=20, min_lr=1e-6)
 elif config.scheduler_type == "warmup":
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
@@ -200,35 +204,65 @@ def run_encoder(real, imag, f_low, f_high, subcarrier_spacing):
     real = torch.tensor(real, dtype=torch.float32, device=device)
     imag = torch.tensor(imag, dtype=torch.float32, device=device)
     freqs = torch.tensor(np.arange(0, f_high, subcarrier_spacing), dtype=torch.float32, device=device) # Start at 0 frequency for shape matching
+
+    # Update freqs to match shape [Nt, Nf]
+    freqs = freqs.unsqueeze(0).repeat(STATE['Nt'], 1)
     k_min = int(np.floor(f_low / subcarrier_spacing))
+    freqs = freqs[:, k_min:]
     x = real + 1j * imag
 
-    data_freqs = torch.tensor(np.arange(f_low, f_high, subcarrier_spacing), dtype=torch.float32, device=device)
-
-    out = STATE['encoder'](x, freqs)
+    # print("Shapes", x.shape, freqs.shape)
     STATE['encoder_in'] = x[:, k_min:]
-    STATE['encoder_out'] = out[:, k_min:] # Remove 0 frequency carriers
-    STATE['frequencies'] = data_freqs
+    out = STATE['encoder'](STATE['encoder_in'], freqs)
+    out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12) # Unit average power
+    STATE['encoder_out'] = out 
+    # print("Encoder Out Shape", out.shape)s
+    STATE['frequencies'] = freqs[0, :].detach() 
+    # print(STATE['frequencies'].shape)
     # Store out in STATE to preserve computational graph
 
     STATE['ML_time'] += (time.time() - start_time)
-    return out.real.detach().cpu().numpy().tolist(), out.imag.detach().cpu().numpy().tolist()
 
-def differentiable_channel(encoder_out: torch.tensor, received_symbols: torch.tensor, type='linear'):
+    # Attach back the zeros.
+    zeros = torch.zeros((out.shape[0], k_min), dtype=out.dtype, device=out.device)
+    out_full = torch.cat([zeros, out], dim=1)
+
+    return out_full.real.detach().cpu().numpy().tolist(), out_full.imag.detach().cpu().numpy().tolist()
+
+def differentiable_channel(encoder_out: torch.tensor, received_symbols: torch.tensor, type):
     if type == 'linear':
-        return received_symbols / encoder_out # Divide equal sized tensors to get H(jw)
+        assert received_symbols.shape == encoder_out.shape
+
+
+        H_est = received_symbols.detach() / (encoder_out.detach() + 1e-12)
+
+        log_channel_estimate(step=STATE['cycle_count'], H_est=H_est, freqs=STATE['frequencies'])
+        log_channel_magnitude_phase(step=STATE['cycle_count'], H_est=H_est, freqs=STATE['frequencies'])
+        return H_est # Divide equal sized tensors to get H(jw)
     elif type == 'ici_matrix':
-        regularization_constant = 1e-4
-        regularization_matrix = torch.eye(STATE['Nt']) * regularization_constant
-        gram_matrix = encoder_out @ encoder_out.t() # [Nt, Nt]
+            # print("d", encoder_out.shape, received_symbols.shape)
+
+        X_list = STATE['encoder_out_buffer']
+        Y_list = STATE['decoder_in_buffer']
+        X = torch.cat(X_list, dim=0)  # Shape: [W * Nt, Nf]
+        Y = torch.cat(Y_list, dim=0) 
+        # X = encoder_out.detach()
+        # Y = received_symbols.detach()
+        regularization_constant = config.matrix_regularization
+        regularization_matrix = torch.eye(STATE['Nf']) * regularization_constant
+        gram_matrix = X.t() @ X # [Nf, Nf]
         inverse_term = torch.linalg.inv(gram_matrix + regularization_matrix)
-        H_k = received_symbols @ encoder_out.t() @ inverse_term # [Nt, Nt]
+        H_k = inverse_term @ X.t() @ Y # [Nf, Nf]
+
+        cond = torch.linalg.cond(gram_matrix)
+        # Log the condition number with wandb
+        STATE['gram_cond'] = cond
 
         # Use this information to get SNR vs Freq information
-        predicted_received_symbols = H_k @ encoder_out
-        STATE['predicted_received_symbols'].append(predicted_received_symbols)
+        STATE['predicted_received_symbols'].append(STATE['encoder_out'] @ H_k)
         STATE['received_symbols'].append(received_symbols)
-        return H_k @ encoder_out # [Nt, Nt] @ [Nt, Nf] -> [Nt, Nf]
+
+        return H_k #[Nf, Nf]
 
 def run_decoder(real, imag):
     # --- Reshape input to [Nt, Nf] ---
@@ -237,11 +271,28 @@ def run_decoder(real, imag):
     real = torch.tensor(real, dtype=torch.float32, device=device).reshape(Nt, Nf)
     imag = torch.tensor(imag, dtype=torch.float32, device=device).reshape(Nt, Nf)
     x = real + 1j * imag
-    STATE['H_channel'] = differentiable_channel(x, STATE['encoder_out'], type='ici_matrix')
 
-    out =  STATE['decoder'](STATE['H_channel'] * STATE['encoder_out'])
-    # Store out in STATE to preserve computational graph
+    # STATE['decoder_in'] =  x / (x.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
     STATE['decoder_in'] = x
+    # Update window buffers
+    STATE['encoder_out_buffer'].append(STATE['encoder_out'].detach())
+    STATE['decoder_in_buffer'].append(STATE['decoder_in'].detach())
+
+    # Truncate to most recent W entries
+    W = config.ici_window_length
+    STATE['encoder_out_buffer'] = STATE['encoder_out_buffer'][-W:]
+    STATE['decoder_in_buffer'] = STATE['decoder_in_buffer'][-W:]
+
+
+    
+    STATE['H_channel'] = differentiable_channel(STATE['encoder_out'], STATE['decoder_in'], type=config.channel_derivative_type)
+
+    if config.channel_derivative_type == 'linear':
+        out =  STATE['decoder'](STATE['H_channel'] * STATE['encoder_out'])
+    elif config.channel_derivative_type == 'ici_matrix':
+        # correction_term = STATE['decoder_in'].detach() - (STATE['H_channel'] @ STATE['encoder_out'].detach())
+        out =  STATE['decoder'](STATE['encoder_out'] @ STATE['H_channel'])
+    # Store out in STATE to preserve computational graph
     STATE['decoder_out'] = out
     out = out.flatten() # Must flatten along batch dimension to output from labview
     STATE['ML_time'] += (time.time() - start_time)
@@ -257,7 +308,6 @@ def update_weights(batch_size=config.batch_size) -> bool:
 
     '''
     output = False
-    STATE['cycle_count'] += 1
     true_symbols = STATE['encoder_in']
     predicted_symbols = STATE['decoder_out']
     evm_loss = evm_loss_func(true_symbols, predicted_symbols)
@@ -273,7 +323,6 @@ def update_weights(batch_size=config.batch_size) -> bool:
         if len(STATE['loss_accumulator']) == batch_size:
             STATE['batch_count'] += 1
             batch_avg_loss = torch.mean(torch.stack(STATE['loss_accumulator']))
-            STATE['scheduler'].step(batch_avg_loss)
             # Track with WandB
             wandb.log({"train/loss" :batch_avg_loss.item()}, step=STATE['cycle_count'])
             STATE['optimizer'].zero_grad()
@@ -296,6 +345,8 @@ def update_weights(batch_size=config.batch_size) -> bool:
             wandb.log({"perf/time_encode_to_decode": elapsed_time}, step=STATE['cycle_count'])
             # Percentage ML time
             wandb.log({"perf/percent_time_for_ML": STATE['ML_time'] / elapsed_time}, step=STATE['cycle_count'])
+            if config.channel_derivative_type == "ici_matrix":
+                wandb.log({"perf/Condition Number of Gram Matrix": STATE['gram_cond'].item()}, step=STATE['cycle_count'])
 
             # Check if need to cancel run early
 
@@ -323,7 +374,9 @@ def update_weights(batch_size=config.batch_size) -> bool:
 
         log_constellation(step=step, freqs=STATE['frequencies'], evm_loss=evm_loss)
 
-        plot_SNR_vs_freq(step=step)
+        # plot_SNR_vs_freq(step=step)
+
+        log_encoder_frequency_sensitivity(step=STATE['cycle_count'], freqs=STATE['frequencies'])
 
         lr = optimizer.param_groups[0]["lr"]
         wandb.log({"train/lr": lr}, step=step)
@@ -358,6 +411,8 @@ def update_weights(batch_size=config.batch_size) -> bool:
             artifact = wandb.Artifact(f"{model_name}_ckpt_step{STATE['cycle_count']}", type="model")
             artifact.add_file(save_path)
             wandb.log_artifact(artifact)
+
+    STATE['cycle_count'] += 1
     return output
 
 def stop_training():
@@ -433,6 +488,34 @@ def plot_SNR_vs_freq(step: int, save_path: str = None):
         plot_path = f"wandb_constellations/snr_freq_step_{step}.png"
         fig.savefig(plot_path, dpi=150)
         wandb.log({"SNR vs Frequency": wandb.Image(plot_path)}, step=step)
+        os.remove(plot_path)
+        plt.close(fig)
+
+
+        # --- Plot constellation diagram for last OFDM frame ---
+        last_received = STATE['received_symbols'][-1]  # [Nt, Nf]
+        last_predicted = STATE['predicted_received_symbols'][-1]  # [Nt, Nf]
+
+        # Flatten both along [Nt * Nf]
+        recv_flat = last_received.flatten().detach().cpu().numpy()
+        pred_flat = last_predicted.flatten().detach().cpu().numpy()
+
+        # Create plot
+        fig, ax = plt.subplots(figsize=(6, 6))
+        ax.scatter(pred_flat.real, pred_flat.imag, s=15, label="Predicted", alpha=0.6)
+        ax.scatter(recv_flat.real, recv_flat.imag, s=15, label="Received", alpha=0.6, marker='x', c='red')
+
+        ax.set_title(f"Constellation Diagram (Last OFDM Frame) - Step {step}")
+        ax.set_xlabel("Real")
+        ax.set_ylabel("Imag")
+        ax.grid(True)
+        ax.legend()
+
+        # Save + log to wandb
+        os.makedirs("wandb_constellations", exist_ok=True)
+        plot_path = f"wandb_constellations/last_frame_constellation_step_{step}.png"
+        fig.savefig(plot_path, dpi=150)
+        wandb.log({"Constellation (Last Frame)": wandb.Image(plot_path)}, step=step)
         os.remove(plot_path)
         plt.close(fig)
 
@@ -541,6 +624,163 @@ def log_constellation(step, freqs=None, evm_loss=-99):
         fig.savefig(plot_path, dpi=150)
         wandb.log({"Constellation Diagram": wandb.Image(plot_path)}, step=step)
         os.remove(plot_path)
+        plt.close(fig)
 
     except Exception as e:
         print(f"Failed to plot constellation at step {step}: {e}")
+
+def log_channel_estimate(step, H_est: torch.Tensor, freqs: torch.Tensor):
+    """
+    Plots estimated complex channel H_k for each subcarrier,
+    colored by carrier frequency.
+
+    Args:
+        step: Training step
+        H_est: Tensor of shape [Nt, Nf] or [Nf] (complex)
+        freqs: Tensor of shape [Nf] (float)
+    """
+    try:
+        # Average across time if needed
+        if H_est.ndim == 2:
+            H_mean = H_est.mean(dim=0)  # [Nf]
+        else:
+            H_mean = H_est  # already [Nf]
+
+        H_mean = H_mean.detach().cpu().numpy()
+        freqs = freqs.detach().cpu().numpy()
+
+        norm_freqs = (freqs - freqs.min()) / (freqs.max() - freqs.min())
+        point_colors = cm.viridis(norm_freqs)
+
+        fig, ax = plt.subplots(figsize=(6, 6))
+        ax.scatter(H_mean.real, H_mean.imag, c=point_colors, s=15, alpha=0.8)
+        ax.set_title(f"Estimated Channel H_k (Step {step})")
+        ax.set_xlabel("Re(H_k)")
+        ax.set_ylabel("Im(H_k)")
+        ax.grid(True)
+        ax.set_aspect("equal")
+
+        # Colorbar
+        norm = colors.Normalize(vmin=freqs.min(), vmax=freqs.max())
+        sm = cm.ScalarMappable(norm=norm, cmap='viridis')
+        sm.set_array([])
+        cbar = fig.colorbar(sm, ax=ax, orientation='vertical')
+        cbar.set_label("Carrier Frequency (Hz)")
+
+        os.makedirs("wandb_constellations", exist_ok=True)
+        plot_path = f"wandb_constellations/estimated_Hk_step_{step}.png"
+        fig.savefig(plot_path, dpi=150)
+        wandb.log({"Estimated H_k Constellation": wandb.Image(plot_path)}, step=step)
+        os.remove(plot_path)
+        plt.close(fig)
+
+    except Exception as e:
+        print(f"Failed to plot estimated H_k at step {step}: {e}")
+        traceback.print_exc()
+
+def log_channel_magnitude_phase(step, H_est: torch.Tensor, freqs: torch.Tensor):
+    """
+    Plots the magnitude and phase of estimated channel H_k across frequency.
+
+    Args:
+        step: Training step
+        H_est: Tensor of shape [Nt, Nf] or [Nf] (complex)
+        freqs: Tensor of shape [Nf] (float)
+    """
+    try:
+        # Average across time if needed
+        if H_est.ndim == 2:
+            H_mean = H_est.mean(dim=0)  # [Nf]
+        else:
+            H_mean = H_est  # [Nf]
+
+        H_mean = H_mean.detach().cpu().numpy()
+        freqs = freqs.detach().cpu().numpy()
+
+        magnitude = np.abs(H_mean)
+        phase = np.angle(H_mean, deg=True)
+
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+        fig.suptitle(f"Channel Estimate Magnitude and Phase @ Step {step}", fontsize=14)
+
+        ax1.plot(freqs, magnitude, label="|H(f)|", color='blue')
+        ax1.set_ylabel("Magnitude")
+        ax1.grid(True)
+
+        ax2.plot(freqs, phase, label="Phase(H(f))", color='green')
+        ax2.set_xlabel("Frequency (Hz)")
+        ax2.set_ylabel("Phase (deg)")
+        ax2.grid(True)
+
+        os.makedirs("wandb_constellations", exist_ok=True)
+        plot_path = f"wandb_constellations/estimated_Hk_mag_phase_step_{step}.png"
+        fig.savefig(plot_path, dpi=150)
+        wandb.log({"Estimated H_k Mag/Phase": wandb.Image(plot_path)}, step=step)
+        os.remove(plot_path)
+        plt.close(fig)
+
+    except Exception as e:
+        print(f"[Error] Failed to plot H_k magnitude and phase at step {step}: {e}")
+        traceback.print_exc()
+
+
+
+def log_encoder_frequency_sensitivity(step, freqs, fixed_symbol=1 + 1j):
+    """
+    Logs how the encoder output varies with frequency for a fixed input symbol.
+    Useful to verify that encoder encodes frequency information.
+
+    Args:
+        step (int): Current training step for logging.
+        freqs (torch.Tensor): Tensor of shape [Nf] or [1, Nf] containing frequency values.
+        fixed_symbol (complex): Complex symbol repeated across frequencies.
+    """
+    try:
+        # Ensure freqs shape is [1, Nf]
+        if freqs.ndim == 1:
+            freqs = freqs.unsqueeze(0)
+
+        B, Nf = freqs.shape
+
+        # Fixed complex input symbol repeated across frequencies
+        x = torch.full((B, Nf), fill_value=fixed_symbol, dtype=torch.cfloat, device=freqs.device)
+
+        # Forward pass through encoder
+        with torch.no_grad():
+            out = STATE['encoder'](x, freqs)  # [1, Nf] complex
+
+        out_np = out.squeeze(0).cpu().numpy()  # [Nf]
+        freqs_np = freqs.squeeze(0).cpu().numpy()
+
+        # Normalize freqs for color
+        norm_freqs = (freqs_np - freqs_np.min()) / (freqs_np.max() - freqs_np.min())
+        point_colors = cm.viridis(norm_freqs)
+
+        # Plot
+        fig, ax = plt.subplots(figsize=(6, 6))
+        ax.scatter(out_np.real, out_np.imag, c=point_colors, s=15)
+        ax.set_title(f"Encoder Output vs Frequency (Fixed Symbol {fixed_symbol}) @ Step {step}")
+        ax.set_xlabel("Re")
+        ax.set_ylabel("Im")
+        ax.grid(True)
+        ax.set_aspect("equal")
+
+        # Add colorbar
+        norm = colors.Normalize(vmin=freqs_np.min(), vmax=freqs_np.max())
+        sm = cm.ScalarMappable(norm=norm, cmap='viridis')
+        sm.set_array([])
+        cbar = fig.colorbar(sm, ax=ax)
+        cbar.set_label("Carrier Frequency (Hz)")
+        fig.tight_layout()
+
+        # Save + log
+        os.makedirs("wandb_constellations", exist_ok=True)
+        plot_path = f"wandb_constellations/encoder_freq_sensitivity_step_{step}.png"
+        fig.savefig(plot_path, dpi=150)
+        wandb.log({"Encoder Frequency Sensitivity": wandb.Image(plot_path)}, step=step)
+        os.remove(plot_path)
+        plt.close(fig)
+
+    except Exception as e:
+        print(f"[Error] Encoder frequency sensitivity plot failed at step {step}: {e}")
+        traceback.print_exc()

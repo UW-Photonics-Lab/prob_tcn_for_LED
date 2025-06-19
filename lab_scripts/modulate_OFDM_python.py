@@ -65,7 +65,8 @@ def modulate_data_OFDM(mode: str,
     constellation = get_constellation(mode)
     encoded_symbols = constellation.bits_to_symbols(bits)
     true_bits = np.array(data)
-
+    if len(true_bits) % constellation.modulation_order != 0:
+        raise ValueError(f"Number of bits not a multiple of modulation order {constellation.modulation_order}! | Allocated {len(true_bits)}")
 
     max_symbols_per_frame = N_data * num_symbols_per_frame
     if len(encoded_symbols) > max_symbols_per_frame:
@@ -118,6 +119,7 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
 
     '''
     symbol_groups = np.array(real_symbol_groups) + np.array(imag_symbol_groups) * 1j
+    STATE['sent_symbols'] = symbol_groups
     N_t = symbol_groups.shape[0]
     barker_code = np.array([1, -1, 1, -1, 1], dtype=float)
     barker_code = np.repeat(barker_code, BARKER_LENGTH // len(barker_code)) # Set as 1%
@@ -282,12 +284,13 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
             end = start + symbol_len
 
             symbol_with_cp = frame_y_t[start:end]
-            symbol = symbol_with_cp[CP_length:]
+            symbol = symbol_with_cp[CP_length:][:fft_len]
+            # symbol /= np.max(np.abs(symbol)) + 1e-12
             symbols.append(symbol)
 
         # Step 3: Apply FFT to each symbol and stack into a matrix
         Y_s_matrix = np.array([np.fft.fft(s) for s in symbols])
-        decode_logger.debug(f"Y_s Matrix Shsape: {Y_s_matrix.shape}\n")
+        # decode_logger.debug(f"Y_s Matrix Shsape: {Y_s_matrix.shape}\n")
 
 
         if debug_plots:
@@ -302,14 +305,14 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
 
         # # Extract both positive and negative frequency carriers
         num_data_carriers = N_data
-        decode_logger.debug(f"Number of Carriers: {N_data}\n")
+        # decode_logger.debug(f"Number of Carriers: {N_data}\n")
 
 
         data_subcarriers_all = []
 
         for symbol_fft in Y_s_matrix:
-            negative_carriers = symbol_fft[k_min + 1:N_data + k_min + 1]
-            decode_logger.debug(f"Number of Received Carriers: {len(negative_carriers)}\n")
+            negative_carriers = symbol_fft[k_min + 1:N_data + k_min + 1] # Account for DC = 0 being added
+            # decode_logger.debug(f"Number of Received Carriers: {len(negative_carriers)}\n")
             # Optionally include positive_carriers if your OFDM symbol is Hermitian symmetric
             # positive_carriers = symbol_fft[-num_data_carriers - k_min - 1: -k_min - 1]
 
@@ -324,7 +327,7 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
 
 
         data_subcarriers = np.concatenate(normalized_data_subcarriers)
-        decode_logger.debug(f"Number Total Carriers: {len(data_subcarriers)}\n")
+        # decode_logger.debug(f"Number Total Carriers: {len(data_subcarriers)}\n")
 
         if debug_plots:
             # Plot 6: Constellation Diagram
@@ -355,6 +358,33 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
             plt.savefig(plot_file)
             plt.close()
 
+
+        if debug_plots:
+            # Estimate the channel for the first OFDM symbol
+            X_k = STATE['sent_symbols'][0][k_min:N_data + k_min]
+            Y_k = np.array(data_subcarriers[:N_data])
+            H_k = Y_k / (X_k + 1e-12)  # Avoid divide-by-zero
+
+            # Compute magnitude and phase
+            H_mag = np.abs(H_k)
+            H_phase = np.angle(H_k, deg=True)
+            freqs = frequencies_per_symbol  # Already defined earlier
+
+            # Bode-like plot
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+            ax1.plot(freqs, 20 * np.log10(H_mag + 1e-12))  # dB scale
+            ax1.set_ylabel("Magnitude (dB)")
+            ax1.set_title("Estimated Channel Frequency Response")
+
+            ax2.plot(freqs, np.unwrap(H_phase))
+            ax2.set_ylabel("Phase (deg)")
+            ax2.set_xlabel("Frequency (Hz)")
+
+            ax1.grid(True)
+            ax2.grid(True)
+            plt.tight_layout()
+            plt.show()
+            plt.close()
     return data_subcarriers.real.tolist(), data_subcarriers.imag.tolist()
 
 
