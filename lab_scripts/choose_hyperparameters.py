@@ -32,6 +32,7 @@ def choose_hyperparameters():
         f.write(str(trial.number))
 
     batch_size = trial.suggest_categorical("batch_size", [1, 8, 16, 32])
+    batch_size = 1
 
     '''
     Modulators:
@@ -39,31 +40,33 @@ def choose_hyperparameters():
     qpsk
 
     '''
-    epochs = 300 * batch_size
+    epochs = 250 * batch_size
     scheduler_type = trial.suggest_categorical("scheduler_type", ['reduce_lr_on_plateu'])
 
     config = {
-        "lr": trial.suggest_float("lr", 1e-4, 1e-2, log=True),
+        "lr": trial.suggest_float("lr", 1e-5, 1e-2, log=True),
         "nhead": trial.suggest_categorical("nhead", [2, 4, 8]),
         "nlayers": trial.suggest_int("nlayers", 2, 6),
         "dim_feedforward": trial.suggest_categorical("dim_feedforward", [64, 128, 256, 512]),
         "batch_size": batch_size,
         "dropout": trial.suggest_float("dropout", 0.0, 0.3),
         "d_model": trial.suggest_categorical("d_model", [64, 128, 256]),
-        "plot_frequency": batch_size,
+        "plot_frequency": 10 * batch_size,
         "save_model_frequency": 500,
-        "EARLY_STOP_PATIENCE": 300 // batch_size, 
+        # "EARLY_STOP_PATIENCE": 500 // batch_size, 
+        "EARLY_STOP_PATIENCE": 1,
         "EARLY_STOP_THRESHOLD": 0.5,
         "modulator": 'm5_apsk_constellation',
-        "epochs": 125 * batch_size,
+        "epochs": 250 * batch_size,
         "gain" : 20,
         "dc_offset": 0,
         "optuna_study": study_name,
         "num_symbols_per_frame" : 1,
         "scheduler_type": scheduler_type,
-        "weight_init": trial.suggest_categorical("weight_init", ["xavier", "kaiming", "normal", "default"]),
+        # "weight_init": trial.suggest_categorical("weight_init", ["xavier", "kaiming", "normal", "default"]),
+        "weight_init": "default",
         "CP_ratio": 0.25,
-        "channel_derivative_type": trial.suggest_categorical("channel_derivative_type", ["ici_matrix", "linear"]),
+        "channel_derivative_type": trial.suggest_categorical("channel_derivative_type", ["linear", "ici_matrix"]),
         # "pre_layer_norm": trial.suggest_categorical("pre_layer_norm", [True, False]),
         "pre_layer_norm": False,
         "ici_window_length": 370

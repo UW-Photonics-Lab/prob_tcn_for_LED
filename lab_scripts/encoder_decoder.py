@@ -201,9 +201,9 @@ def run_encoder(real, imag, f_low, f_high, subcarrier_spacing):
     STATE['start_time'] = start_time
     STATE['ML_time'] = 0
 
-    real = torch.tensor(real, dtype=torch.float32, device=device)
-    imag = torch.tensor(imag, dtype=torch.float32, device=device)
-    freqs = torch.tensor(np.arange(0, f_high, subcarrier_spacing), dtype=torch.float32, device=device) # Start at 0 frequency for shape matching
+    real = torch.tensor(real, dtype=torch.float16, device=device)
+    imag = torch.tensor(imag, dtype=torch.float16, device=device)
+    freqs = torch.tensor(np.arange(0, f_high, subcarrier_spacing), dtype=torch.float16, device=device) # Start at 0 frequency for shape matching
 
     # Update freqs to match shape [Nt, Nf]
     freqs = freqs.unsqueeze(0).repeat(STATE['Nt'], 1)
@@ -215,12 +215,9 @@ def run_encoder(real, imag, f_low, f_high, subcarrier_spacing):
     STATE['encoder_in'] = x[:, k_min:]
     out = STATE['encoder'](STATE['encoder_in'], freqs)
     out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12) # Unit average power
-    STATE['encoder_out'] = out 
-    # print("Encoder Out Shape", out.shape)s
-    STATE['frequencies'] = freqs[0, :].detach() 
-    # print(STATE['frequencies'].shape)
     # Store out in STATE to preserve computational graph
-
+    STATE['encoder_out'] = out 
+    STATE['frequencies'] = freqs[0, :].detach() 
     STATE['ML_time'] += (time.time() - start_time)
 
     # Attach back the zeros.
@@ -232,22 +229,19 @@ def run_encoder(real, imag, f_low, f_high, subcarrier_spacing):
 def differentiable_channel(encoder_out: torch.tensor, received_symbols: torch.tensor, type):
     if type == 'linear':
         assert received_symbols.shape == encoder_out.shape
-
-
         H_est = received_symbols.detach() / (encoder_out.detach() + 1e-12)
-
-        log_channel_estimate(step=STATE['cycle_count'], H_est=H_est, freqs=STATE['frequencies'])
-        log_channel_magnitude_phase(step=STATE['cycle_count'], H_est=H_est, freqs=STATE['frequencies'])
+        if STATE['cycle_count'] % config.plot_frequency == 0:
+            log_channel_estimate(step=STATE['cycle_count'], H_est=H_est, freqs=STATE['frequencies'])
+            log_channel_magnitude_phase(step=STATE['cycle_count'], H_est=H_est, freqs=STATE['frequencies'])
         return H_est # Divide equal sized tensors to get H(jw)
     elif type == 'ici_matrix':
-            # print("d", encoder_out.shape, received_symbols.shape)
 
         X_list = STATE['encoder_out_buffer']
         Y_list = STATE['decoder_in_buffer']
         X = torch.cat(X_list, dim=0)  # Shape: [W * Nt, Nf]
         Y = torch.cat(Y_list, dim=0) 
-        # X = encoder_out.detach()
-        # Y = received_symbols.detach()
+        X = X.detach()
+        Y = Y.detach()
         regularization_constant = config.matrix_regularization
         regularization_matrix = torch.eye(STATE['Nf']) * regularization_constant
         gram_matrix = X.t() @ X # [Nf, Nf]
@@ -268,11 +262,9 @@ def run_decoder(real, imag):
     # --- Reshape input to [Nt, Nf] ---
     Nt, Nf = STATE['encoder_out'].shape
     start_time = time.time()
-    real = torch.tensor(real, dtype=torch.float32, device=device).reshape(Nt, Nf)
-    imag = torch.tensor(imag, dtype=torch.float32, device=device).reshape(Nt, Nf)
+    real = torch.tensor(real, dtype=torch.float16, device=device).reshape(Nt, Nf)
+    imag = torch.tensor(imag, dtype=torch.float16, device=device).reshape(Nt, Nf)
     x = real + 1j * imag
-
-    # STATE['decoder_in'] =  x / (x.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
     STATE['decoder_in'] = x
     # Update window buffers
     STATE['encoder_out_buffer'].append(STATE['encoder_out'].detach())
@@ -290,7 +282,6 @@ def run_decoder(real, imag):
     if config.channel_derivative_type == 'linear':
         out =  STATE['decoder'](STATE['H_channel'] * STATE['encoder_out'])
     elif config.channel_derivative_type == 'ici_matrix':
-        # correction_term = STATE['decoder_in'].detach() - (STATE['H_channel'] @ STATE['encoder_out'].detach())
         out =  STATE['decoder'](STATE['encoder_out'] @ STATE['H_channel'])
     # Store out in STATE to preserve computational graph
     STATE['decoder_out'] = out
@@ -304,8 +295,6 @@ def update_weights(batch_size=config.batch_size) -> bool:
 
     Returns:
         cancel_early: bool flags whether to stop current training session
-
-
     '''
     output = False
     true_symbols = STATE['encoder_in']
@@ -354,8 +343,6 @@ def update_weights(batch_size=config.batch_size) -> bool:
 
                 if batch_avg_loss > config.EARLY_STOP_THRESHOLD:
                     # Cancel training
-
-                        # Cancel training
                     msg = (
                         f"Early stopping triggered at batcg {STATE['batch_count']}! "
                         f"Batch avg loss {batch_avg_loss:.4f} exceeded threshold {config.EARLY_STOP_THRESHOLD}."
@@ -698,13 +685,14 @@ def log_channel_magnitude_phase(step, H_est: torch.Tensor, freqs: torch.Tensor):
         freqs = freqs.detach().cpu().numpy()
 
         magnitude = np.abs(H_mean)
+        magnitude_dB = 20 * np.log10(magnitude + 1e-12)
         phase = np.angle(H_mean, deg=True)
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
         fig.suptitle(f"Channel Estimate Magnitude and Phase @ Step {step}", fontsize=14)
 
         ax1.plot(freqs, magnitude, label="|H(f)|", color='blue')
-        ax1.set_ylabel("Magnitude")
+        ax1.set_ylabel("Magnitude (dB)")
         ax1.grid(True)
 
         ax2.plot(freqs, phase, label="Phase(H(f))", color='green')

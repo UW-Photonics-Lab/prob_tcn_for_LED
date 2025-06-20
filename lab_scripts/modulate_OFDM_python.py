@@ -17,7 +17,7 @@ import torch
 # Get logging
 from lab_scripts.logging_code import *
 
-decode_logger = setup_logger(log_file=r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\decode_bits_log.txt")
+# decode_logger = setup_logger(log_file=r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\decode_bits_log.txt")
 
 
 def get_constellation(mode: str):
@@ -189,8 +189,8 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
 
     # Open log file for writing
     with open(log_file, 'w') as log:
-        log.write("Demodulation Log\n")
-        log.write("================\n")
+        # log.write("Demodulation Log\n")
+        # log.write("================\n")
         
         constellation = get_constellation(mode)
 
@@ -217,8 +217,8 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
         corr = signal.correlate(voltages, preamble_sequence_upsampled, mode='valid')
         peaks, _ = find_peaks(corr, height=0.99*np.max(corr), distance=len(preamble_sequence_upsampled))
 
-        log.write(f"Number of peaks detected: {len(peaks)}\n")
-        log.write(f"Peaks: {peaks}\n")
+        # log.write(f"Number of peaks detected: {len(peaks)}\n")
+        # log.write(f"Peaks: {peaks}\n")
     
         if debug_plots:
             # Plot 2: Resampled signal
