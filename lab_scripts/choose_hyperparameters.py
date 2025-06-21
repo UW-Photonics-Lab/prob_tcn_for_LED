@@ -31,8 +31,7 @@ def choose_hyperparameters():
     with open("trial_number.txt", "w") as f:
         f.write(str(trial.number))
 
-    batch_size = trial.suggest_categorical("batch_size", [1, 8, 16, 32])
-    batch_size = 1
+    batch_size = trial.suggest_categorical("batch_size", [16])
 
     '''
     Modulators:
@@ -40,21 +39,20 @@ def choose_hyperparameters():
     qpsk
 
     '''
-    epochs = 250 * batch_size
+    epochs = 300 * batch_size
     scheduler_type = trial.suggest_categorical("scheduler_type", ['reduce_lr_on_plateu'])
 
     config = {
-        "lr": trial.suggest_float("lr", 1e-5, 1e-2, log=True),
+        "lr": trial.suggest_float("lr", 1e-5, 1e-3, log=True),
         "nhead": trial.suggest_categorical("nhead", [2, 4, 8]),
-        "nlayers": trial.suggest_int("nlayers", 2, 6),
+        "nlayers": trial.suggest_int("nlayers", 2, 8),
         "dim_feedforward": trial.suggest_categorical("dim_feedforward", [64, 128, 256, 512]),
         "batch_size": batch_size,
         "dropout": trial.suggest_float("dropout", 0.0, 0.3),
         "d_model": trial.suggest_categorical("d_model", [64, 128, 256]),
-        "plot_frequency": 10 * batch_size,
+        "plot_frequency": 2 * batch_size,
         "save_model_frequency": 500,
-        # "EARLY_STOP_PATIENCE": 500 // batch_size, 
-        "EARLY_STOP_PATIENCE": 1,
+        "EARLY_STOP_PATIENCE": 2000 // batch_size, 
         "EARLY_STOP_THRESHOLD": 0.5,
         "modulator": 'm5_apsk_constellation',
         "epochs": 250 * batch_size,
@@ -67,11 +65,9 @@ def choose_hyperparameters():
         "weight_init": "default",
         "CP_ratio": 0.25,
         "channel_derivative_type": trial.suggest_categorical("channel_derivative_type", ["linear", "ici_matrix"]),
-        # "pre_layer_norm": trial.suggest_categorical("pre_layer_norm", [True, False]),
-        "pre_layer_norm": False,
-        "ici_window_length": 370
+        "pre_layer_norm": trial.suggest_categorical("pre_layer_norm", [True, False]),
+        'ici_window_length': 10000
     }
-
     if config["scheduler_type"] == "warmup":
          config["warmup_steps"] = trial.suggest_int("warmup_steps", 0, int(0.2 * epochs))
 

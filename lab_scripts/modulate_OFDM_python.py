@@ -388,8 +388,9 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
     return data_subcarriers.real.tolist(), data_subcarriers.imag.tolist()
 
 
-from encoder_decoder import update_weights
+
 def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,  mode: str) -> list:
+    from encoder_decoder import update_weights
     # Instead of grabbing from labview, directly take from decoder
     if 'decoder_out' in STATE:
         symbols = STATE['decoder_out']

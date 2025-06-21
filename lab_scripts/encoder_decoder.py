@@ -41,6 +41,7 @@ elif torch.mps.is_available():
 else:
     device = torch.device("cpu")
 
+print("Device", device)
 # Add a loss accumulator to state
 STATE['loss_accumulator'] = []
 STATE['predicted_received_symbols'] = []
@@ -55,32 +56,52 @@ class FrequencyPositionalEmbedding(nn.Module):
         super().__init__()
         assert d_model % 2 == 0
         self.d_model = d_model
-        self.linear = nn.Linear(2, d_model)
-
 
     def forward(self, x, freq):
         '''
         Applies positional encoding
 
         Args:
-            x: [B, N, d_model]
-            freq: [B, N]
+            x: [Nt, Nf, d_model]
+            freq: [Nt, Nf]
         '''
 
-        B, N, _ = x.shape
+        Nt, Nf, _ = x.shape
 
         # Frequency embedding
         div_term = torch.exp(
             torch.arange(0, self.d_model, 2, device=device) * -np.log(1e4) / self.d_model
             ).unsqueeze(0).unsqueeze(0) # [1, 1, d_model//2]
-        pe = torch.zeros(B, N, self.d_model).to(device)
+        pe = torch.zeros(Nt, Nf, self.d_model).to(device)
         freq = freq.unsqueeze(-1) # [B, Nf, 1]
         # print("Frequencies", freq)
-        angles = div_term * freq # [B, Nf, dmodel//2]
+        angles = div_term * freq # [Nt, Nf, dmodel//2]
         pe[:, :, 0::2] = torch.sin(angles)
         pe[:, :, 1::2] = torch.cos(angles)
         x = x + pe[:x.size(0)]
         return x
+
+class FrequencyEmbedding(nn.Module):
+    def __init__(self, d_model: int):
+        super().__init__()
+        self.embedding = nn.Embedding(STATE['Nf'], d_model)
+
+    def forward(self, x, freqs: torch.Tensor):
+        """
+        Args:
+            x: [Nt, Nf, d_model]  - embedded symbols
+            freqs: [Nt, Nf]       - subcarrier indices (ints in [0, Nf-1])
+        Returns:
+            [Nt, Nf, d_model]     - embedded symbols + freq info
+        """
+        if freqs.ndim == 1:
+            # Expand to [1, Nf] for batch compatibility
+            freqs = freqs.unsqueeze(0)
+        assert freqs.shape[1] == STATE['Nf']
+        freq_indices = torch.arange(STATE['Nf']).repeat(STATE['Nt']).reshape(STATE['Nt'], STATE['Nf'])
+        freq_embed = self.embedding(freq_indices)  # [Nt, Nf, d_model]
+        return x + freq_embed
+    
 
 class SymbolEmbedding(nn.Module):
     def __init__(self, d_model: int):
@@ -90,10 +111,10 @@ class SymbolEmbedding(nn.Module):
         self.d_model = d_model
 
     def forward(self, x: torch.tensor) -> torch.tensor:
-        x_real = x.real.unsqueeze(-1) # [B, N, 1]
-        x_imag = x.imag.unsqueeze(-1) # [B, N, 1]
-        combined = torch.cat([x_real, x_imag], dim=-1) # [B, N, 2]
-        return self.linear(combined) # [B, N, 2] -> [B, N, d_model]
+        x_real = x.real.unsqueeze(-1) # [Nt, Nf, 1]
+        x_imag = x.imag.unsqueeze(-1) # [Nt, Nf, 1]
+        combined = torch.cat([x_real, x_imag], dim=-1) # [Nt, Nf, 2]
+        return self.linear(combined) # [Nt, Nf, 2] -> [Nt, Nf, d_model]
 
 
 
@@ -107,11 +128,10 @@ class TransformerEncoder(nn.Module):
         self.output = nn.Linear(d_model, 2)
 
     def forward(self, x: torch.tensor, freqs: torch.tensor) -> torch.tensor:
-        embedded_symbols = self.symbol_embed(x) # [B, N, d_model]
-        # print("Before freq:", freqs)
-        freq_embedded_symbols = self.frequency_embed(embedded_symbols, freqs) # [B, N, d_model]
-        out = self.transformer(freq_embedded_symbols) # [B, N, d_model]
-        out = self.output(out) #[B, N, 2]
+        embedded_symbols = self.symbol_embed(x) # [Nt, Nf, d_model]
+        embedded_symbols = self.frequency_embed(embedded_symbols, freqs) # [Nt, Nf, d_model] testing no frequency embedding
+        out = self.transformer(embedded_symbols) # [Nt, Nf, d_model]
+        out = self.output(out) #[Nt, Nf, 2]
         return out[..., 0] + 1j * out[..., 1] # Real and Imag
 
 class TransformerDecoder(nn.Module):
@@ -143,6 +163,9 @@ decoder = TransformerDecoder(d_model=config.d_model,
                              nlayers=config.nlayers,
                              dim_feedforward=config.dim_feedforward,
                              dropout=config.dropout).to(device)
+
+# encoder = encoder.half()
+# decoder = decoder.half()
 
 
 def apply_weight_init(model, method):
@@ -192,7 +215,7 @@ def evm_loss_func(true_symbols, predicted_symbols):
 # Called in Labview
 def run_encoder(real, imag, f_low, f_high, subcarrier_spacing):
     """
-    Inputs: real, imag, freqs - Python lists [B, N]
+    Inputs: real, imag, freqs - Python lists [Nt, Nf]
     Returns: encoded_real, encoded_imag - same shape
     """
 
@@ -201,9 +224,9 @@ def run_encoder(real, imag, f_low, f_high, subcarrier_spacing):
     STATE['start_time'] = start_time
     STATE['ML_time'] = 0
 
-    real = torch.tensor(real, dtype=torch.float16, device=device)
-    imag = torch.tensor(imag, dtype=torch.float16, device=device)
-    freqs = torch.tensor(np.arange(0, f_high, subcarrier_spacing), dtype=torch.float16, device=device) # Start at 0 frequency for shape matching
+    real = torch.tensor(real, dtype=torch.float32, device=device)
+    imag = torch.tensor(imag, dtype=torch.float32, device=device)
+    freqs = torch.tensor(np.arange(0, f_high, subcarrier_spacing), dtype=torch.float32, device=device) # Start at 0 frequency for shape matching
 
     # Update freqs to match shape [Nt, Nf]
     freqs = freqs.unsqueeze(0).repeat(STATE['Nt'], 1)
@@ -227,6 +250,28 @@ def run_encoder(real, imag, f_low, f_high, subcarrier_spacing):
     return out_full.real.detach().cpu().numpy().tolist(), out_full.imag.detach().cpu().numpy().tolist()
 
 def differentiable_channel(encoder_out: torch.tensor, received_symbols: torch.tensor, type):
+
+    # The following code can allow for an estimate of SNR vs freq.
+    X_list = STATE['encoder_out_buffer']
+    Y_list = STATE['decoder_in_buffer']
+    X = torch.cat(X_list, dim=0)  # Shape: [W * Nt, Nf]
+    Y = torch.cat(Y_list, dim=0) 
+    X = X.detach()
+    Y = Y.detach()
+    regularization_constant = config.matrix_regularization
+    regularization_matrix = torch.eye(int(STATE['Nf'])) * regularization_constant
+    # regularization_matrix = 0
+    gram_matrix = X.t() @ X # [Nf, Nf]
+    inverse_term = torch.linalg.inv(gram_matrix + regularization_matrix)
+    H_k = inverse_term @ X.t() @ Y # [Nf, Nf]
+
+    Y_pred = STATE['encoder_out'].detach() @ H_k
+    STATE['predicted_received_symbols'].append(Y_pred.detach())
+    STATE['received_symbols'].append(received_symbols.detach())
+
+    cond = torch.linalg.cond(gram_matrix)
+    # Log the condition number with wandb
+    STATE['gram_cond'] = cond
     if type == 'linear':
         assert received_symbols.shape == encoder_out.shape
         H_est = received_symbols.detach() / (encoder_out.detach() + 1e-12)
@@ -235,35 +280,18 @@ def differentiable_channel(encoder_out: torch.tensor, received_symbols: torch.te
             log_channel_magnitude_phase(step=STATE['cycle_count'], H_est=H_est, freqs=STATE['frequencies'])
         return H_est # Divide equal sized tensors to get H(jw)
     elif type == 'ici_matrix':
-
-        X_list = STATE['encoder_out_buffer']
-        Y_list = STATE['decoder_in_buffer']
-        X = torch.cat(X_list, dim=0)  # Shape: [W * Nt, Nf]
-        Y = torch.cat(Y_list, dim=0) 
-        X = X.detach()
-        Y = Y.detach()
-        regularization_constant = config.matrix_regularization
-        regularization_matrix = torch.eye(STATE['Nf']) * regularization_constant
-        gram_matrix = X.t() @ X # [Nf, Nf]
-        inverse_term = torch.linalg.inv(gram_matrix + regularization_matrix)
-        H_k = inverse_term @ X.t() @ Y # [Nf, Nf]
-
-        cond = torch.linalg.cond(gram_matrix)
-        # Log the condition number with wandb
-        STATE['gram_cond'] = cond
-
-        # Use this information to get SNR vs Freq information
-        STATE['predicted_received_symbols'].append(STATE['encoder_out'] @ H_k)
-        STATE['received_symbols'].append(received_symbols)
-
+        # Keep track of how much error there is between XH and Y_true
+        Y_pred = STATE['encoder_out'].detach() @ H_k
+        evm_diff = torch.mean(torch.abs(Y_pred - received_symbols))
+        wandb.log({"train/evm_diff_ICI_matrix": evm_diff}, step=STATE['cycle_count'])
         return H_k #[Nf, Nf]
 
 def run_decoder(real, imag):
     # --- Reshape input to [Nt, Nf] ---
     Nt, Nf = STATE['encoder_out'].shape
     start_time = time.time()
-    real = torch.tensor(real, dtype=torch.float16, device=device).reshape(Nt, Nf)
-    imag = torch.tensor(imag, dtype=torch.float16, device=device).reshape(Nt, Nf)
+    real = torch.tensor(real, dtype=torch.float32, device=device).reshape(Nt, Nf)
+    imag = torch.tensor(imag, dtype=torch.float32, device=device).reshape(Nt, Nf)
     x = real + 1j * imag
     STATE['decoder_in'] = x
     # Update window buffers
@@ -274,9 +302,6 @@ def run_decoder(real, imag):
     W = config.ici_window_length
     STATE['encoder_out_buffer'] = STATE['encoder_out_buffer'][-W:]
     STATE['decoder_in_buffer'] = STATE['decoder_in_buffer'][-W:]
-
-
-    
     STATE['H_channel'] = differentiable_channel(STATE['encoder_out'], STATE['decoder_in'], type=config.channel_derivative_type)
 
     if config.channel_derivative_type == 'linear':
@@ -335,7 +360,7 @@ def update_weights(batch_size=config.batch_size) -> bool:
             # Percentage ML time
             wandb.log({"perf/percent_time_for_ML": STATE['ML_time'] / elapsed_time}, step=STATE['cycle_count'])
             if config.channel_derivative_type == "ici_matrix":
-                wandb.log({"perf/Condition Number of Gram Matrix": STATE['gram_cond'].item()}, step=STATE['cycle_count'])
+                wandb.log({"perf/Condition Number of Gram Matrix log_10": np.log10(STATE['gram_cond'].item())}, step=STATE['cycle_count'])
 
             # Check if need to cancel run early
 
@@ -364,6 +389,9 @@ def update_weights(batch_size=config.batch_size) -> bool:
         # plot_SNR_vs_freq(step=step)
 
         log_encoder_frequency_sensitivity(step=STATE['cycle_count'], freqs=STATE['frequencies'])
+        attn_weights = get_attention_map(STATE['encoder'], STATE['encoder_in'], STATE['frequencies'])
+        log_attention_heatmap(attn_weights[0, 0], step=STATE['cycle_count'])  # [N, N] map for head 0
+        plot_SNR_vs_freq(step=STATE['cycle_count'])
 
         lr = optimizer.param_groups[0]["lr"]
         wandb.log({"train/lr": lr}, step=step)
@@ -418,6 +446,18 @@ def stop_training():
         wandb.log_artifact(artifact)
         wandb.finish()
 
+
+def get_attention_map(model, x: torch.Tensor, freqs: torch.Tensor):
+    # Forward through embedding layers
+    with torch.no_grad():
+        symbol_embed = model.symbol_embed(x)
+        freq_embed = model.frequency_embed(symbol_embed, freqs)
+
+        # Use the first encoder layer only
+        attn_layer = model.transformer.layers[0]  # type: nn.TransformerEncoderLayer
+        mha = attn_layer.self_attn
+        attn_output, attn_weights = mha(freq_embed, freq_embed, freq_embed, need_weights=True, average_attn_weights=False)
+        return attn_weights  # Shape: [B, num_heads, N, N]
 
 def plot_SNR_vs_freq(step: int, save_path: str = None):
 
@@ -772,3 +812,59 @@ def log_encoder_frequency_sensitivity(step, freqs, fixed_symbol=1 + 1j):
     except Exception as e:
         print(f"[Error] Encoder frequency sensitivity plot failed at step {step}: {e}")
         traceback.print_exc()
+
+
+def log_attention_heatmap(attn_weights: torch.Tensor, step: int):
+    try:
+        # Handle different possible shapes
+        if attn_weights.ndim == 2:
+            attn_map = attn_weights.detach().cpu().numpy()
+        else:
+            print(f"[Error] Unexpected attn_weights shape: {attn_weights.shape}")
+            return
+
+        fig, ax = plt.subplots(figsize=(6, 5))
+        im = ax.imshow(attn_map, cmap='viridis', aspect='auto')
+        fig.colorbar(im, ax=ax, label='Attention Weight')
+        ax.set_title(f"Self-Attention Map @ Step {step}")
+        ax.set_xlabel("Key Subcarrier Index")
+        ax.set_ylabel("Query Subcarrier Index")
+
+        os.makedirs("wandb_constellations", exist_ok=True)
+        plot_path = f"wandb_constellations/attention_step_{step}.png"
+        fig.savefig(plot_path, dpi=150)
+        wandb.log({"Attention Map": wandb.Image(plot_path)}, step=step)
+        os.remove(plot_path)
+        plt.close(fig)
+
+    except Exception as e:
+        print(f"[Error] Failed to log attention map at step {step}: {e}")
+
+
+def log_evm_vs_time(step: int = None):
+    """
+    Logs the EVM (Error Vector Magnitude) between all predicted and received symbols
+    stored in STATE['predicted_received_symbols'] and STATE['received_symbols'].
+    Plots EVM vs. frame/time and logs to wandb.
+    """
+    try:
+        preds = STATE['predicted_received_symbols']
+        recvs = STATE['received_symbols']
+        if len(preds) == 0 or len(recvs) == 0:
+            print("[log_evm_vs_time] No data to log.")
+            return
+
+        # Stack to [num_frames, Nt, Nf] or [num_frames, Nf]
+        preds = torch.stack(preds, dim=0)
+        recvs = torch.stack(recvs, dim=0)
+
+        # Compute EVM per frame: mean over all symbols in each frame
+        evm_per_frame = torch.mean(torch.abs(preds - recvs), dim=(1, 2) if preds.ndim == 3 else 1)  # [num_frames]
+
+        # Convert to numpy for plotting
+        evm_per_frame_np = evm_per_frame.detach().cpu().numpy()
+        wandb.log({"train/evm_diff_frame": evm_per_frame_np}, step=step)
+
+
+    except Exception as e:
+        print(f"[Error] Failed to log EVM vs time: {e}")
