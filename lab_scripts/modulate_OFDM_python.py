@@ -18,8 +18,8 @@ import torch
 from lab_scripts.logging_code import *
 
 # decode_logger = setup_logger(log_file=r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\decode_bits_log.txt")
-
-
+STATE['sent_symbols'] = []
+STATE['received_symbols'] = []
 def get_constellation(mode: str):
         if mode == "qpsk":
             constellation = QPSK_Constellation()
@@ -105,6 +105,7 @@ AWG_MEMORY_LENGTH = 16384
 # AWG_MEMORY_LENGTH = 105
 # AWG_MEMORY_LENGTH = 65536
 
+
 BARKER_LENGTH = int(0.01 * (AWG_MEMORY_LENGTH)) if int(0.01 * (AWG_MEMORY_LENGTH)) > 5 else 5
 CP_RATIO = 0.25
 def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: list[list[float]], cyclic_prefix_length: int) -> list[float]:
@@ -119,7 +120,7 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
 
     '''
     symbol_groups = np.array(real_symbol_groups) + np.array(imag_symbol_groups) * 1j
-    STATE['sent_symbols'] = symbol_groups
+    STATE['sent_symbols'].append(torch.tensor(symbol_groups[:, -STATE['Nf']:]))
     N_t = symbol_groups.shape[0]
     barker_code = np.array([1, -1, 1, -1, 1], dtype=float)
     barker_code = np.repeat(barker_code, BARKER_LENGTH // len(barker_code)) # Set as 1%
@@ -173,9 +174,9 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
                                      f_max: float,
                                      subcarrier_delta_f: float,
                                      Nt: int) -> list:
-    '''Converts received y(t) into a bit string with optional debugging plots'''
+    '''Converts received y(t) into symbols with optional debugging plots'''
 
-    debug_plots = False
+    debug_plots = True
 
     # Define paths for saving logs and plots
     log_dir = r'C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs'
@@ -221,7 +222,6 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
         # log.write(f"Peaks: {peaks}\n")
     
         if debug_plots:
-            # Plot 2: Resampled signal
             plt.subplot(322)
             plt.plot(voltages)
             plt.title(f'Resampled Signal Length: {len(voltages)}')
@@ -229,7 +229,6 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
             plt.ylabel('Amplitude')
 
         if debug_plots:
-            # Plot 3: Correlation output
             plt.subplot(323)
             plt.plot(corr)
             plt.title('Correlation with Preamble')
@@ -260,7 +259,6 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
             frames.append(frame)
 
         if debug_plots and len(frames) > 0:
-            # Plot 4: First extracted frame
             plt.subplot(324)
             plt.plot(frames[0])
             plt.title(f'First Extracted Frame Length: {len(frames[0])}')
@@ -288,7 +286,6 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
             # symbol /= np.max(np.abs(symbol)) + 1e-12
             symbols.append(symbol)
 
-        # Step 3: Apply FFT to each symbol and stack into a matrix
         Y_s_matrix = np.array([np.fft.fft(s) for s in symbols])
         # decode_logger.debug(f"Y_s Matrix Shsape: {Y_s_matrix.shape}\n")
 
@@ -321,14 +318,13 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
         normalized_data_subcarriers = []
 
         for carriers in data_subcarriers_all:
-            scale = np.max(np.abs(constellation._complex_symbols)) / np.max(np.abs(carriers))
+            scale = np.sqrt(np.mean(np.abs(constellation._complex_symbols)**2)) / np.sqrt(np.mean(np.abs(carriers)**2) + 1e-12)
             normalized_carriers = carriers * scale
             normalized_data_subcarriers.append(normalized_carriers)
 
-
+        STATE['received_symbols'].append(torch.tensor(normalized_data_subcarriers))
         data_subcarriers = np.concatenate(normalized_data_subcarriers)
         # decode_logger.debug(f"Number Total Carriers: {len(data_subcarriers)}\n")
-
         if debug_plots:
             # Plot 6: Constellation Diagram
 
@@ -361,8 +357,8 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
 
         if debug_plots:
             # Estimate the channel for the first OFDM symbol
-            X_k = STATE['sent_symbols'][0][k_min:N_data + k_min]
-            Y_k = np.array(data_subcarriers[:N_data])
+            X_k = np.array(STATE['sent_symbols'][-1])[0]
+            Y_k = np.array(STATE['received_symbols'][-1])[0]
             H_k = Y_k / (X_k + 1e-12)  # Avoid divide-by-zero
 
             # Compute magnitude and phase

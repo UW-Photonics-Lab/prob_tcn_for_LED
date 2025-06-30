@@ -45,11 +45,12 @@ print("Device", device)
 # Add a loss accumulator to state
 STATE['loss_accumulator'] = []
 STATE['predicted_received_symbols'] = []
-STATE['received_symbols'] = []
+
 STATE['cycle_count'] = 0
 STATE['batch_count'] = 0
 STATE['encoder_out_buffer'] = [] 
 STATE['decoder_in_buffer'] = []
+
 
 class FrequencyPositionalEmbedding(nn.Module):
     def __init__(self, d_model):
@@ -252,24 +253,36 @@ def run_encoder(real, imag, f_low, f_high, subcarrier_spacing):
 def differentiable_channel(encoder_out: torch.tensor, received_symbols: torch.tensor, type):
 
     # The following code can allow for an estimate of SNR vs freq.
-    X_list = STATE['encoder_out_buffer']
-    Y_list = STATE['decoder_in_buffer']
-    X = torch.cat(X_list, dim=0)  # Shape: [W * Nt, Nf]
-    Y = torch.cat(Y_list, dim=0) 
+    X_list = STATE['sent_symbols']
+    Y_list = STATE['received_symbols']
+
+    assert len(X_list) == len(Y_list)
+
+    X = torch.cat(X_list, dim=0).to(torch.complex64)
+    Y = torch.cat(Y_list, dim=0).to(torch.complex64)
     X = X.detach()
     Y = Y.detach()
-    regularization_constant = config.matrix_regularization
-    regularization_matrix = torch.eye(int(STATE['Nf'])) * regularization_constant
-    # regularization_matrix = 0
     gram_matrix = X.t() @ X # [Nf, Nf]
-    inverse_term = torch.linalg.inv(gram_matrix + regularization_matrix)
+    
+    cond = torch.linalg.cond(gram_matrix)
+    if cond < 1e4:
+        inverse_term = torch.linalg.inv(gram_matrix)
+    else:
+        regularization_constant = config.matrix_regularization
+        regularization_matrix = torch.eye(int(STATE['Nf'])) * regularization_constant
+        inverse_term = torch.linalg.inv(gram_matrix + regularization_matrix)
+
+
     H_k = inverse_term @ X.t() @ Y # [Nf, Nf]
 
-    Y_pred = STATE['encoder_out'].detach() @ H_k
-    STATE['predicted_received_symbols'].append(Y_pred.detach())
-    STATE['received_symbols'].append(received_symbols.detach())
+    # Y_pred = STATE['encoder_out'].detach() @ H_k
+    Y_pred = encoder_out.detach() @ H_k
 
-    cond = torch.linalg.cond(gram_matrix)
+    # print("prediction diff", torch.sum(Y_pred_enc - Y_pred).item())
+    # print('actual diff1', torch.sum(Y_pred_enc - received_symbols).item())
+    # print('actual diff2', torch.sum(Y_pred - received_symbols).item())
+    STATE['predicted_received_symbols'].append(Y_pred.detach())
+
     # Log the condition number with wandb
     STATE['gram_cond'] = cond
     if type == 'linear':
@@ -287,7 +300,7 @@ def differentiable_channel(encoder_out: torch.tensor, received_symbols: torch.te
         return H_k #[Nf, Nf]
 
 def run_decoder(real, imag):
-    # --- Reshape input to [Nt, Nf] ---
+    # Reshape input to [Nt, Nf]
     Nt, Nf = STATE['encoder_out'].shape
     start_time = time.time()
     real = torch.tensor(real, dtype=torch.float32, device=device).reshape(Nt, Nf)
@@ -307,7 +320,8 @@ def run_decoder(real, imag):
     if config.channel_derivative_type == 'linear':
         out =  STATE['decoder'](STATE['H_channel'] * STATE['encoder_out'])
     elif config.channel_derivative_type == 'ici_matrix':
-        out =  STATE['decoder'](STATE['encoder_out'] @ STATE['H_channel'])
+        Y = STATE['encoder_out'] @ STATE['H_channel']
+        out =  STATE['decoder'](Y)
     # Store out in STATE to preserve computational graph
     STATE['decoder_out'] = out
     out = out.flatten() # Must flatten along batch dimension to output from labview
@@ -465,21 +479,13 @@ def plot_SNR_vs_freq(step: int, save_path: str = None):
         # Get frequencies
         data_frequencies = STATE['frequencies']
 
-        # Get sent and received symbols
-        received_symbols = STATE['received_symbols']
-        received_symbols = torch.stack(received_symbols, dim=0) # [k, Nt, Nf]
-        predicted_symbols = STATE['predicted_received_symbols']
-        predicted_symbols = torch.stack(predicted_symbols, dim=0) # [k, Nt, Nf]
+        last_received = STATE['received_symbols'][-1]  # [Nt, Nf]
+        last_predicted = STATE['predicted_received_symbols'][-1]  # [Nt, Nf]
 
-        # Create large tensors of shape [Nt * k, Nf]
-        # Collapse k and Nt -> shape becomes [k * Nt, Nf]
-        received_symbols = received_symbols.reshape(-1, received_symbols.shape[-1])  # [k * Nt, Nf]
-        predicted_symbols = predicted_symbols.reshape(-1, predicted_symbols.shape[-1])  # [k * Nt, Nf]
+        num = torch.mean(torch.abs(last_predicted - last_received), dim=0) # Mean across Nt
+        denom = torch.mean(torch.abs(last_received), dim=0)
 
         # Calculate EVM by freq
-        
-        num = torch.mean(torch.square(torch.abs(received_symbols - predicted_symbols)), dim=0) # [Nf]
-        denom = torch.mean(torch.square(torch.abs(predicted_symbols)), dim=0)
         evm_by_freq = num / denom
         assert len(data_frequencies) == len(evm_by_freq)
 
@@ -517,11 +523,6 @@ def plot_SNR_vs_freq(step: int, save_path: str = None):
         wandb.log({"SNR vs Frequency": wandb.Image(plot_path)}, step=step)
         os.remove(plot_path)
         plt.close(fig)
-
-
-        # --- Plot constellation diagram for last OFDM frame ---
-        last_received = STATE['received_symbols'][-1]  # [Nt, Nf]
-        last_predicted = STATE['predicted_received_symbols'][-1]  # [Nt, Nf]
 
         # Flatten both along [Nt * Nf]
         recv_flat = last_received.flatten().detach().cpu().numpy()
@@ -731,11 +732,11 @@ def log_channel_magnitude_phase(step, H_est: torch.Tensor, freqs: torch.Tensor):
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
         fig.suptitle(f"Channel Estimate Magnitude and Phase @ Step {step}", fontsize=14)
 
-        ax1.plot(freqs, magnitude, label="|H(f)|", color='blue')
+        ax1.plot(freqs, magnitude_dB, label="|H(f)|", color='blue')
         ax1.set_ylabel("Magnitude (dB)")
         ax1.grid(True)
 
-        ax2.plot(freqs, phase, label="Phase(H(f))", color='green')
+        ax2.plot(freqs, np.unwrap(phase), label="Phase(H(f))", color='green')
         ax2.set_xlabel("Frequency (Hz)")
         ax2.set_ylabel("Phase (deg)")
         ax2.grid(True)

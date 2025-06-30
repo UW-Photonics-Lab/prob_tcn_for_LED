@@ -52,7 +52,7 @@ def choose_hyperparameters():
         "d_model": trial.suggest_categorical("d_model", [64, 128, 256]),
         "plot_frequency": 2 * batch_size,
         "save_model_frequency": 500,
-        "EARLY_STOP_PATIENCE": 2000 // batch_size, 
+        "EARLY_STOP_PATIENCE": 3000 // batch_size, 
         "EARLY_STOP_THRESHOLD": 0.5,
         "modulator": 'm5_apsk_constellation',
         "epochs": 250 * batch_size,
@@ -64,15 +64,17 @@ def choose_hyperparameters():
         # "weight_init": trial.suggest_categorical("weight_init", ["xavier", "kaiming", "normal", "default"]),
         "weight_init": "default",
         "CP_ratio": 0.25,
-        "channel_derivative_type": trial.suggest_categorical("channel_derivative_type", ["linear", "ici_matrix"]),
-        "pre_layer_norm": trial.suggest_categorical("pre_layer_norm", [True, False]),
-        'ici_window_length': 10000
+        "channel_derivative_type": trial.suggest_categorical("channel_derivative_type", ["linear"]),
+        # "pre_layer_norm": trial.suggest_categorical("pre_layer_norm", [True, False]),
+        "pre_layer_norm": False,
+        'ici_window_length': 10000,
+        "matrix_regularization": 0.0001
     }
     if config["scheduler_type"] == "warmup":
          config["warmup_steps"] = trial.suggest_int("warmup_steps", 0, int(0.2 * epochs))
 
-    if config["channel_derivative_type"] == "ici_matrix":
-         config['matrix_regularization'] = trial.suggest_float("matrix_regularization", 1e-6, 1e-3, log=True)
+    # if config["channel_derivative_type"] == "ici_matrix":
+    #      config['matrix_regularization'] = trial.suggest_float("matrix_regularization", 1e-6, 1e-3, log=True)
 
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
