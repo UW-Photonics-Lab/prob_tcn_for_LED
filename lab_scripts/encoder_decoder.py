@@ -237,8 +237,11 @@ def run_encoder(real, imag, f_low, f_high, subcarrier_spacing):
 
     # print("Shapes", x.shape, freqs.shape)
     STATE['encoder_in'] = x[:, k_min:]
-    out = STATE['encoder'](STATE['encoder_in'], freqs)
-    out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12) # Unit average power
+    if STATE['cycle_count'] < 600 and True:
+        out =  x[:, k_min:]
+    else:
+        out = STATE['encoder'](STATE['encoder_in'], freqs)
+        out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12) # Unit average power
     # Store out in STATE to preserve computational graph
     STATE['encoder_out'] = out 
     STATE['frequencies'] = freqs[0, :].detach() 
@@ -328,6 +331,36 @@ def run_decoder(real, imag):
     STATE['ML_time'] += (time.time() - start_time)
     return out.real.detach().cpu().contiguous().numpy().tolist(), out.imag.detach().cpu().contiguous().numpy().tolist()
 
+"loss schedulers"
+
+def constant_then_drop(step, drop_at=50):
+    return 1.0 if step < drop_at else 0.0
+
+def linear_schedule(step, max_steps=1000):
+    return max(0.0, 1.0 - step / max_steps)
+
+def normal(step):
+    return 0
+
+
+class StableLoss(nn.Module):
+
+    def __init__(self, schedule_fn):
+        super().__init__()
+        self.schedule_fn = schedule_fn
+
+    
+    def forward(self, encoder_out: torch.tensor, decoder_out: torch.tensor, true_symbols: torch.tensor, step: int):
+
+        preservation_loss = torch.mean(torch.abs(encoder_out - true_symbols) ** 2)
+
+        evm_loss = evm_loss_func(true_symbols, decoder_out)
+
+        lambda_t = self.schedule_fn(step)
+
+        return lambda_t * preservation_loss + (1 - lambda_t) * evm_loss
+
+LossObject = StableLoss(normal)
 
 def update_weights(batch_size=config.batch_size) -> bool:
     '''Updates weights
@@ -337,11 +370,13 @@ def update_weights(batch_size=config.batch_size) -> bool:
     '''
     output = False
     true_symbols = STATE['encoder_in']
+    encoder_out = STATE['encoder_out']
     predicted_symbols = STATE['decoder_out']
     evm_loss = evm_loss_func(true_symbols, predicted_symbols)
+
     if evm_loss is not None:
         start_time = time.time()
-        STATE['loss_accumulator'].append(evm_loss)
+        STATE['loss_accumulator'].append(LossObject(encoder_out, predicted_symbols, true_symbols, step=STATE['batch_count']))
 
         elapsed_time = time.time() - STATE['start_time']
         # Calculate time for ML parts
@@ -727,7 +762,7 @@ def log_channel_magnitude_phase(step, H_est: torch.Tensor, freqs: torch.Tensor):
 
         magnitude = np.abs(H_mean)
         magnitude_dB = 20 * np.log10(magnitude + 1e-12)
-        phase = np.angle(H_mean, deg=True)
+        phase = np.unwrap(np.angle(H_mean))
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
         fig.suptitle(f"Channel Estimate Magnitude and Phase @ Step {step}", fontsize=14)
@@ -736,7 +771,7 @@ def log_channel_magnitude_phase(step, H_est: torch.Tensor, freqs: torch.Tensor):
         ax1.set_ylabel("Magnitude (dB)")
         ax1.grid(True)
 
-        ax2.plot(freqs, np.unwrap(phase), label="Phase(H(f))", color='green')
+        ax2.plot(freqs, phase * (180 / np.pi), label="Phase(H(f))", color='green')
         ax2.set_xlabel("Frequency (Hz)")
         ax2.set_ylabel("Phase (deg)")
         ax2.grid(True)
