@@ -42,13 +42,42 @@ def choose_hyperparameters():
     epochs = 300 * batch_size
     scheduler_type = trial.suggest_categorical("scheduler_type", ['reduce_lr_on_plateu'])
 
+    # config = {
+    #     "lr": trial.suggest_float("lr", 1e-5, 1e-3, log=True),
+    #     "nhead": trial.suggest_categorical("nhead", [2, 4, 8]),
+    #     "nlayers": trial.suggest_int("nlayers", 2, 8),
+    #     "dim_feedforward": trial.suggest_categorical("dim_feedforward", [64, 128, 256, 512]),
+    #     "batch_size": batch_size,
+    #     "dropout": trial.suggest_float("dropout", 0.0, 0.3),
+    #     "d_model": trial.suggest_categorical("d_model", [64, 128, 256]),
+    #     "plot_frequency": 2 * batch_size,
+    #     "save_model_frequency": 500,
+    #     "EARLY_STOP_PATIENCE": 3000 // batch_size, 
+    #     "EARLY_STOP_THRESHOLD": 0.5,
+    #     "modulator": 'm5_apsk_constellation',
+    #     "epochs": 250 * batch_size,
+    #     "gain" : 20,
+    #     "dc_offset": 0,
+    #     "optuna_study": study_name,
+    #     "num_symbols_per_frame" : 1,
+    #     "scheduler_type": scheduler_type,
+    #     # "weight_init": trial.suggest_categorical("weight_init", ["xavier", "kaiming", "normal", "default"]),
+    #     "weight_init": "default",
+    #     "CP_ratio": 0.25,
+    #     "channel_derivative_type": trial.suggest_categorical("channel_derivative_type", ["linear"]),
+    #     # "pre_layer_norm": trial.suggest_categorical("pre_layer_norm", [True, False]),
+    #     "pre_layer_norm": False,
+    #     'ici_window_length': 10000,
+    #     "matrix_regularization": 0.0001
+    # }
+
     config = {
         "lr": trial.suggest_float("lr", 1e-5, 1e-3, log=True),
         "nhead": trial.suggest_categorical("nhead", [2, 4, 8]),
         "nlayers": trial.suggest_int("nlayers", 2, 8),
         "dim_feedforward": trial.suggest_categorical("dim_feedforward", [64, 128, 256, 512]),
         "batch_size": batch_size,
-        "dropout": trial.suggest_float("dropout", 0.0, 0.3),
+        "dropout": trial.suggest_float("dropout", 0.0, 0.2),
         "d_model": trial.suggest_categorical("d_model", [64, 128, 256]),
         "plot_frequency": 2 * batch_size,
         "save_model_frequency": 500,
@@ -61,15 +90,11 @@ def choose_hyperparameters():
         "optuna_study": study_name,
         "num_symbols_per_frame" : 1,
         "scheduler_type": scheduler_type,
-        # "weight_init": trial.suggest_categorical("weight_init", ["xavier", "kaiming", "normal", "default"]),
         "weight_init": "default",
         "CP_ratio": 0.25,
-        "channel_derivative_type": trial.suggest_categorical("channel_derivative_type", ["linear"]),
-        # "pre_layer_norm": trial.suggest_categorical("pre_layer_norm", [True, False]),
-        "pre_layer_norm": False,
-        'ici_window_length': 10000,
-        "matrix_regularization": 0.0001
+        "pre_layer_norm": False
     }
+
     if config["scheduler_type"] == "warmup":
          config["warmup_steps"] = trial.suggest_int("warmup_steps", 0, int(0.2 * epochs))
 

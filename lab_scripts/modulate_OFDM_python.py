@@ -472,6 +472,8 @@ def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,
        # Call backprop and log loss
     if 'encoder_out' in STATE and 'decoder_out' in STATE:
         cancel_run_early = update_weights()
+    elif 'cancel_channel_train' in STATE:
+        cancel_run_early = STATE['cancel_channel_train']
     else:
         cancel_run_early = False
 

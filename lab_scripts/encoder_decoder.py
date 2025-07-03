@@ -165,6 +165,12 @@ decoder = TransformerDecoder(d_model=config.d_model,
                              dim_feedforward=config.dim_feedforward,
                              dropout=config.dropout).to(device)
 
+channel_model = TransformerEncoder(d_model=config.d_model,
+                             nhead=config.nhead,
+                             nlayers=config.nlayers,
+                             dim_feedforward=config.dim_feedforward,
+                             dropout=config.dropout).to(device)
+
 # encoder = encoder.half()
 # decoder = decoder.half()
 
@@ -193,12 +199,26 @@ elif config.scheduler_type == "warmup":
         num_warmup_steps=config.warmup_steps,
         num_training_steps=config.epochs
     )
+
+channel_optimizer = optim.Adam(list(channel_model.parameters()), lr=float(config.lr))
+if config.scheduler_type == "reduce_lr_on_plateu":
+    channel_scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=20, min_lr=1e-6)
+elif config.scheduler_type == "warmup":
+    channel_scheduler = get_linear_schedule_with_warmup(
+        channel_optimizer,
+        num_warmup_steps=config.warmup_steps,
+        num_training_steps=config.epochs
+    )
 # Add these models to STATE to pass information among scripts
 
 STATE['encoder'] = encoder
 STATE['decoder'] = decoder
 STATE['optimizer'] = optimizer
+STATE['channel_optimizer'] = channel_optimizer
+
 STATE['scheduler'] = scheduler
+STATE['channel_scheduler'] = channel_scheduler
+STATE['channel_model'] = channel_model
 
 
 def evm_loss_func(true_symbols, predicted_symbols):
@@ -212,6 +232,127 @@ def evm_loss_func(true_symbols, predicted_symbols):
     """
     return torch.mean((true_symbols.real - predicted_symbols.real) ** 2 +
                       (true_symbols.imag - predicted_symbols.imag) ** 2)
+
+
+def append_to_npz(npz_path, sent, received):
+    # sent, received: np.ndarray (2D, e.g. [Nt, Nf])
+    if os.path.exists(npz_path):
+        data = np.load(npz_path)
+        sent_arr = data['sent']
+        received_arr = data['received']
+        # Stack along a new axis (frame index)
+        sent_arr = np.concatenate([sent_arr, sent[None, ...]], axis=0)
+        received_arr = np.concatenate([received_arr, received[None, ...]], axis=0)
+    else:
+        sent_arr = sent[None, ...]
+        received_arr = received[None, ...]
+    np.savez(npz_path, sent=sent_arr, received=received_arr)
+
+def train_channel_model_TX(real, imag, f_low, f_high, subcarrier_spacing):
+    real = torch.tensor(real, dtype=torch.float32, device=device)
+    imag = torch.tensor(imag, dtype=torch.float32, device=device)
+    freqs = torch.tensor(np.arange(0, f_high, subcarrier_spacing), dtype=torch.float32, device=device) # Start at 0 frequency for shape matching
+
+    # Update freqs to match shape [Nt, Nf]
+    freqs = freqs.unsqueeze(0).repeat(STATE['Nt'], 1)
+    k_min = int(np.floor(f_low / subcarrier_spacing))
+    freqs = freqs[:, k_min:]
+    out = real + 1j * imag
+    out = out[:, k_min:]
+
+
+    # Save prediction for loss calculation
+    STATE['channel_prediction'] = STATE['channel_model'](out, freqs)
+    STATE['last_sent_channel'] = out
+
+    # Attach back the zeros.
+    zeros = torch.zeros((out.shape[0], k_min), dtype=out.dtype, device=out.device)
+    out_full = torch.cat([zeros, out], dim=1)
+    return out_full.real.detach().cpu().numpy().tolist(), out_full.imag.detach().cpu().numpy().tolist()
+
+
+def train_channel_model_RY(real, imag):
+    real = torch.tensor(real, dtype=torch.float32, device=device).reshape(STATE['Nt'], STATE['Nf'])
+    imag = torch.tensor(imag, dtype=torch.float32, device=device).reshape(STATE['Nt'], STATE['Nf'])
+    out = real + 1j * imag
+
+    # Update local dataset
+    # append_to_npz(r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_inputs_outputs.npz", STATE["last_sent_channel"], out)
+
+    # Calculate loss
+    predicted_symbols = STATE['channel_prediction']
+    loss = evm_loss_func(predicted_symbols, out)
+    if loss is not None:
+        STATE['loss_accumulator'].append(loss)
+        if len(STATE['loss_accumulator']) == config.batch_size:
+            STATE['batch_count'] += 1
+            step = STATE['batch_count']
+            batch_avg_loss = torch.mean(torch.stack(STATE['loss_accumulator']))
+            # Track with WandB
+            wandb.log({"train/loss" :batch_avg_loss.item()}, step=step)
+            STATE['channel_optimizer'].zero_grad()
+            batch_avg_loss.backward()
+            STATE['channel_optimizer'].step()
+            # Clear accumulator
+            STATE['loss_accumulator'].clear()
+
+            if config.scheduler_type == "reduce_lr_on_plateu":
+                STATE['channel_scheduler'].step(batch_avg_loss)
+            else:
+                STATE['channel_scheduler'].step()
+            
+            # Save final loss so that optuna can use it later
+            with open("final_loss.txt", "w") as f:
+                    f.write(str(batch_avg_loss.item()))
+
+            # Performing plotting for batch
+            lr = optimizer.param_groups[0]["lr"]
+            wandb.log({"train/lr": lr}, step=step)
+            for model_name in ['channel_model']:
+                model = STATE[model_name]
+                for name, param in model.named_parameters():
+                    # Log weights
+                    wandb.log({f"weights/{model_name}/{name}": wandb.Histogram(param.data.cpu())}, step=step)
+
+                    # Log gradients and accumulate norm
+                    if param.grad is not None:
+                        grad = param.grad.detach().cpu()
+                        wandb.log({f"grads/{model_name}/{name}": wandb.Histogram(grad)}, step=step)
+
+                        # Calculate norm
+                        grad_norm = grad.norm().item()
+                        wandb.log({f"grad_norms/{model_name}/{name}": grad_norm}, step=step)
+                    else:
+                        if len(STATE['loss_accumulator']) == config.batch_size:
+                            print("Gradient is None Incorrectly!")
+
+    if STATE['batch_count'] > config.EARLY_STOP_PATIENCE:
+        if batch_avg_loss > config.EARLY_STOP_THRESHOLD:
+            # Cancel training
+            msg = (
+                f"Early stopping triggered at batcg {STATE['batch_count']}! "
+                f"Batch avg loss {batch_avg_loss:.4f} exceeded threshold {config.EARLY_STOP_THRESHOLD}."
+            )
+            print(msg)
+            STATE['cancel_channel_train'] = True
+        else:
+            STATE['cancel_channel_train'] = False
+
+    if STATE['cycle_count'] % config.save_model_frequency == 0:
+        model_save_dir = os.path.join(script_dir, "..", "saved_models")
+        os.makedirs(model_save_dir, exist_ok=True)
+
+        for model_name in ['channel_model']:
+            model = STATE[model_name]
+            save_path = os.path.join(model_save_dir, f"{model_name}_step{STATE['cycle_count']}.pt")
+            torch.save(model.state_dict(), save_path)
+            artifact = wandb.Artifact(f"{model_name}_ckpt_step{STATE['cycle_count']}", type="model")
+            artifact.add_file(save_path)
+            wandb.log_artifact(artifact)
+
+        
+    out = out.flatten() # Must flatten along batch dimension to output from labview
+    return out.real.detach().cpu().contiguous().numpy().tolist(), out.imag.detach().cpu().contiguous().numpy().tolist()
 
 # Called in Labview
 def run_encoder(real, imag, f_low, f_high, subcarrier_spacing):
@@ -495,6 +636,17 @@ def stop_training():
         wandb.log_artifact(artifact)
         wandb.finish()
 
+def stop_training_channel_model():
+    print("Finished all epochs!")
+    # Save models
+    model_save_dir = os.path.join(script_dir, "..", "saved_models")
+    os.makedirs(model_save_dir, exist_ok=True)
+    channel_model_path = os.path.join(model_save_dir, "channel_model.pt")
+    torch.save(STATE['channel_model'].state_dict(), channel_model_path)
+    artifact = wandb.Artifact("transformer-models", type="model")
+    artifact.add_file(channel_model_path)
+    wandb.log_artifact(artifact)
+    wandb.finish()
 
 def get_attention_map(model, x: torch.Tensor, freqs: torch.Tensor):
     # Forward through embedding layers
