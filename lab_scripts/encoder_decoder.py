@@ -7,6 +7,7 @@ import yaml
 import wandb
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import os
+import json
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import matplotlib.colors as colors
@@ -16,9 +17,18 @@ from transformers import get_linear_schedule_with_warmup
 import traceback
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
-config_path = os.path.join(script_dir, "..", "config.yml")
-with open(config_path, "r") as f:
-    hyperparams = yaml.safe_load(f)
+
+load_model = False # Variable
+LOAD_DIR = ""
+if load_model:
+    LOAD_DIR = r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\models\pickled_models\fluent-sea-1361" # Variable
+    with open(os.path.join(LOAD_DIR, "config.json"), "r") as f:
+        hyperparams = json.load(f)
+
+else:
+    config_path = os.path.join(script_dir, "..", "config.yml")
+    with open(config_path, "r") as f:
+        hyperparams = yaml.safe_load(f)
 
 
 # Start Weights and Biases session
@@ -50,7 +60,9 @@ STATE['cycle_count'] = 0
 STATE['batch_count'] = 0
 STATE['encoder_out_buffer'] = [] 
 STATE['decoder_in_buffer'] = []
-
+STATE['train_model'] = False # Variable
+STATE['validate_model'] = False # Variable
+STATE['train_channel'] = True # Variable
 
 class FrequencyPositionalEmbedding(nn.Module):
     def __init__(self, d_model):
@@ -117,14 +129,12 @@ class SymbolEmbedding(nn.Module):
         combined = torch.cat([x_real, x_imag], dim=-1) # [Nt, Nf, 2]
         return self.linear(combined) # [Nt, Nf, 2] -> [Nt, Nf, d_model]
 
-
-
 class TransformerEncoder(nn.Module):
-    def __init__(self, d_model, nhead, nlayers, dim_feedforward, dropout):
+    def __init__(self, d_model, nhead, nlayers, dim_feedforward, dropout, norm_first=config.pre_layer_norm):
         super().__init__()
         self.frequency_embed = FrequencyPositionalEmbedding(d_model)
         self.symbol_embed = SymbolEmbedding(d_model)
-        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward=dim_feedforward, batch_first=True, dropout=dropout, norm_first=config.pre_layer_norm)
+        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward=dim_feedforward, batch_first=True, dropout=dropout, norm_first=norm_first)
         self.transformer = nn.TransformerEncoder(encoder_layer, nlayers)
         self.output = nn.Linear(d_model, 2)
 
@@ -136,10 +146,10 @@ class TransformerEncoder(nn.Module):
         return out[..., 0] + 1j * out[..., 1] # Real and Imag
 
 class TransformerDecoder(nn.Module):
-    def __init__(self, d_model, nhead, nlayers, dim_feedforward, dropout):
+    def __init__(self, d_model, nhead, nlayers, dim_feedforward, dropout, norm_first=config.pre_layer_norm):
         super().__init__()
         self.sym_embed = SymbolEmbedding(d_model)
-        decoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward=dim_feedforward, batch_first=True, dropout=dropout, norm_first=config.pre_layer_norm)
+        decoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward=dim_feedforward, batch_first=True, dropout=dropout, norm_first=norm_first)
         self.transformer = nn.TransformerEncoder(decoder_layer, nlayers)
         self.output = nn.Linear(d_model, 2)
 
@@ -152,24 +162,45 @@ class TransformerDecoder(nn.Module):
 def evm_loss(true_symbols, predicted_symbols):
         return torch.mean((true_symbols.real - predicted_symbols.real) ** 2 + (true_symbols.imag - predicted_symbols.imag) ** 2)
 
-# === Initialize models on device ===
-encoder = TransformerEncoder(d_model=config.d_model,
-                             nhead=config.nhead,
-                             nlayers=config.nlayers,
-                             dim_feedforward=config.dim_feedforward,
-                             dropout=config.dropout).to(device)
+if load_model:
+    with open(os.path.join(LOAD_DIR, "config.json"), "r") as f:
+        remote_config = json.load(f)
 
-decoder = TransformerDecoder(d_model=config.d_model,
-                             nhead=config.nhead,
-                             nlayers=config.nlayers,
-                             dim_feedforward=config.dim_feedforward,
-                             dropout=config.dropout).to(device)
+    encoder = TransformerEncoder(d_model=remote_config['d_model'],
+                                nhead=remote_config['nhead'],
+                                nlayers=remote_config['nlayers'],
+                                dim_feedforward=remote_config['dim_feedforward'],
+                                dropout=remote_config['dropout'])
+    encoder.load_state_dict(torch.load(os.path.join(LOAD_DIR, "encoder_weights.pth")))
+    encoder.eval()
 
-channel_model = TransformerEncoder(d_model=config.d_model,
-                             nhead=config.nhead,
-                             nlayers=config.nlayers,
-                             dim_feedforward=config.dim_feedforward,
-                             dropout=config.dropout).to(device)
+    decoder = TransformerDecoder(d_model=remote_config['d_model'],
+                                nhead=remote_config['nhead'],
+                                nlayers=remote_config['nlayers'],
+                                dim_feedforward=remote_config['dim_feedforward'],
+                                dropout=remote_config['dropout'])
+    decoder.load_state_dict(torch.load(os.path.join(LOAD_DIR, "decoder_weights.pth")))
+    decoder.eval()
+
+else:
+    # === Initialize models on device ===
+    encoder = TransformerEncoder(d_model=config.d_model,
+                                nhead=config.nhead,
+                                nlayers=config.nlayers,
+                                dim_feedforward=config.dim_feedforward,
+                                dropout=config.dropout).to(device)
+
+    decoder = TransformerDecoder(d_model=config.d_model,
+                                nhead=config.nhead,
+                                nlayers=config.nlayers,
+                                dim_feedforward=config.dim_feedforward,
+                                dropout=config.dropout).to(device)
+
+    channel_model = TransformerEncoder(d_model=config.d_model,
+                                nhead=config.nhead,
+                                nlayers=config.nlayers,
+                                dim_feedforward=config.dim_feedforward,
+                                dropout=config.dropout).to(device)
 
 # encoder = encoder.half()
 # decoder = decoder.half()
@@ -187,8 +218,9 @@ def apply_weight_init(model, method):
         if hasattr(module, "bias") and module.bias is not None:
             nn.init.constant_(module.bias, 0)
 
-apply_weight_init(encoder, config.weight_init)
-apply_weight_init(decoder, config.weight_init)
+if not STATE['validate_model']:
+    apply_weight_init(encoder, config.weight_init)
+    apply_weight_init(decoder, config.weight_init)
 
 optimizer = optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=float(config.lr))
 if config.scheduler_type == "reduce_lr_on_plateu":
@@ -199,27 +231,26 @@ elif config.scheduler_type == "warmup":
         num_warmup_steps=config.warmup_steps,
         num_training_steps=config.epochs
     )
+if STATE['train_channel']:
+    channel_optimizer = optim.Adam(list(channel_model.parameters()), lr=float(config.lr))
+    if config.scheduler_type == "reduce_lr_on_plateu":
+        channel_scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=20, min_lr=1e-6)
+    elif config.scheduler_type == "warmup":
+        channel_scheduler = get_linear_schedule_with_warmup(
+            channel_optimizer,
+            num_warmup_steps=config.warmup_steps,
+            num_training_steps=config.epochs
+        )
 
-channel_optimizer = optim.Adam(list(channel_model.parameters()), lr=float(config.lr))
-if config.scheduler_type == "reduce_lr_on_plateu":
-    channel_scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=20, min_lr=1e-6)
-elif config.scheduler_type == "warmup":
-    channel_scheduler = get_linear_schedule_with_warmup(
-        channel_optimizer,
-        num_warmup_steps=config.warmup_steps,
-        num_training_steps=config.epochs
-    )
+    STATE['channel_optimizer'] = channel_optimizer
+    STATE['channel_scheduler'] = channel_scheduler
+    STATE['channel_model'] = channel_model
+
 # Add these models to STATE to pass information among scripts
-
 STATE['encoder'] = encoder
 STATE['decoder'] = decoder
 STATE['optimizer'] = optimizer
-STATE['channel_optimizer'] = channel_optimizer
-
 STATE['scheduler'] = scheduler
-STATE['channel_scheduler'] = channel_scheduler
-STATE['channel_model'] = channel_model
-
 
 def evm_loss_func(true_symbols, predicted_symbols):
     """
@@ -248,23 +279,84 @@ def append_to_npz(npz_path, sent, received):
         received_arr = received[None, ...]
     np.savez(npz_path, sent=sent_arr, received=received_arr)
 
-def train_channel_model_TX(real, imag, f_low, f_high, subcarrier_spacing):
+STATE['run_model'] = True
+def validate_encoder(real, imag, f_low, f_high, subcarrier_spacing):
     real = torch.tensor(real, dtype=torch.float32, device=device)
     imag = torch.tensor(imag, dtype=torch.float32, device=device)
+    k_min = int(np.floor(f_low / subcarrier_spacing))
+    if STATE['run_model']:
+        freqs = torch.arange(0, f_high, subcarrier_spacing, dtype=torch.float32, device=device)
+        freqs = freqs.unsqueeze(0).repeat(STATE['Nt'], 1)
+  
+        freqs = freqs[:, k_min:]
+        x = real + 1j * imag
+
+        STATE['encoder_in'] = x[:, k_min:]
+        out = STATE['encoder'](STATE['encoder_in'], freqs)
+        out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12) # Unit average power
+        STATE['encoder_out'] = out 
+        STATE['frequencies'] = freqs[0, :].detach() 
+
+        # Attach back the zeros.
+        zeros = torch.zeros((out.shape[0], k_min), dtype=out.dtype, device=out.device)
+        out_full = torch.cat([zeros, out], dim=1)
+        return out_full.real.detach().cpu().numpy().tolist(), out_full.imag.detach().cpu().numpy().tolist()
+    else:
+        # No model
+        out = real + 1j * imag
+        STATE['encoder_in'] = out[:, k_min:]
+        return  out.real.detach().cpu().numpy().tolist(), out.imag.detach().cpu().numpy().tolist()
+
+def validate_decoder(real, imag):
+    # Reshape input to [Nt, Nf]
+    Nt, Nf = STATE['encoder_out'].shape
+    if STATE['run_model'] :  
+        real = torch.tensor(real, dtype=torch.float32, device=device).reshape(Nt, Nf)
+        imag = torch.tensor(imag, dtype=torch.float32, device=device).reshape(Nt, Nf)
+        x = real + 1j * imag
+        STATE['decoder_in'] = x
+        out = STATE['decoder'](x)
+        STATE['decoder_out'] = out
+        out = out.flatten() # Must flatten along batch dimension to output from labview
+        return out.real.detach().cpu().contiguous().numpy().tolist(), out.imag.detach().cpu().contiguous().numpy().tolist()
+    else:
+        # No model
+        real = torch.tensor(real, dtype=torch.float32, device=device).reshape(Nt, Nf)
+        imag = torch.tensor(imag, dtype=torch.float32, device=device).reshape(Nt, Nf)
+        out = real + 1j * imag
+        STATE['decoder_in'] = out
+        STATE['decoder_out'] = out
+        out = out.flatten()
+        return out.real.detach().cpu().contiguous().numpy().tolist(), out.imag.detach().cpu().contiguous().numpy().tolist()
+
+def train_channel_model_TX(real, imag, f_low, f_high, subcarrier_spacing):
+    # real = torch.tensor(real, dtype=torch.float32, device=device)
+    # imag = torch.tensor(imag, dtype=torch.float32, device=device)
+    Nt = STATE['Nt']
+    Nf = STATE['Nf']
+
+    # Sample complex Gaussian: real and imag ~ N(0, 1)
+    real_part = torch.randn(Nt, Nf)
+    imag_part = torch.randn(Nt, Nf)
+    out = real_part + 1j * imag_part
+    out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
+
     freqs = torch.tensor(np.arange(0, f_high, subcarrier_spacing), dtype=torch.float32, device=device) # Start at 0 frequency for shape matching
 
     # Update freqs to match shape [Nt, Nf]
     freqs = freqs.unsqueeze(0).repeat(STATE['Nt'], 1)
     k_min = int(np.floor(f_low / subcarrier_spacing))
     freqs = freqs[:, k_min:]
-    out = real + 1j * imag
-    out = out[:, k_min:]
-
+    # out = real + 1j * imag
+    # out = out[:, k_min:]
+    STATE['encoder_in'] = out
 
     # Save prediction for loss calculation
     STATE['channel_prediction'] = STATE['channel_model'](out, freqs)
+    out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
+    STATE['encoder_out'] = STATE['channel_prediction'] 
     STATE['last_sent_channel'] = out
-
+    STATE['frequencies'] = freqs[0, :].detach() 
     # Attach back the zeros.
     zeros = torch.zeros((out.shape[0], k_min), dtype=out.dtype, device=out.device)
     out_full = torch.cat([zeros, out], dim=1)
@@ -275,13 +367,14 @@ def train_channel_model_RY(real, imag):
     real = torch.tensor(real, dtype=torch.float32, device=device).reshape(STATE['Nt'], STATE['Nf'])
     imag = torch.tensor(imag, dtype=torch.float32, device=device).reshape(STATE['Nt'], STATE['Nf'])
     out = real + 1j * imag
-
+    STATE['decoder_in'] = out
     # Update local dataset
     # append_to_npz(r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_inputs_outputs.npz", STATE["last_sent_channel"], out)
 
     # Calculate loss
     predicted_symbols = STATE['channel_prediction']
     loss = evm_loss_func(predicted_symbols, out)
+    STATE['cycle_count'] += 1
     if loss is not None:
         STATE['loss_accumulator'].append(loss)
         if len(STATE['loss_accumulator']) == config.batch_size:
@@ -308,6 +401,7 @@ def train_channel_model_RY(real, imag):
             # Performing plotting for batch
             lr = optimizer.param_groups[0]["lr"]
             wandb.log({"train/lr": lr}, step=step)
+            plot_received_vs_predicted(out, predicted_symbols, step, STATE['frequencies'])
             for model_name in ['channel_model']:
                 model = STATE[model_name]
                 for name, param in model.named_parameters():
@@ -326,17 +420,17 @@ def train_channel_model_RY(real, imag):
                         if len(STATE['loss_accumulator']) == config.batch_size:
                             print("Gradient is None Incorrectly!")
 
-    if STATE['batch_count'] > config.EARLY_STOP_PATIENCE:
-        if batch_avg_loss > config.EARLY_STOP_THRESHOLD:
-            # Cancel training
-            msg = (
-                f"Early stopping triggered at batcg {STATE['batch_count']}! "
-                f"Batch avg loss {batch_avg_loss:.4f} exceeded threshold {config.EARLY_STOP_THRESHOLD}."
-            )
-            print(msg)
-            STATE['cancel_channel_train'] = True
-        else:
-            STATE['cancel_channel_train'] = False
+            if STATE['batch_count'] > config.EARLY_STOP_PATIENCE:
+                if batch_avg_loss > config.EARLY_STOP_THRESHOLD:
+                    # Cancel training
+                    msg = (
+                        f"Early stopping triggered at batcg {STATE['batch_count']}! "
+                        f"Batch avg loss {batch_avg_loss:.4f} exceeded threshold {config.EARLY_STOP_THRESHOLD}."
+                    )
+                    print(msg)
+                    STATE['cancel_channel_train'] = True
+                else:
+                    STATE['cancel_channel_train'] = False
 
     if STATE['cycle_count'] % config.save_model_frequency == 0:
         model_save_dir = os.path.join(script_dir, "..", "saved_models")
@@ -350,7 +444,7 @@ def train_channel_model_RY(real, imag):
             artifact.add_file(save_path)
             wandb.log_artifact(artifact)
 
-        
+    STATE['decoder_out'] = out
     out = out.flatten() # Must flatten along batch dimension to output from labview
     return out.real.detach().cpu().contiguous().numpy().tolist(), out.imag.detach().cpu().contiguous().numpy().tolist()
 
@@ -379,7 +473,7 @@ def run_encoder(real, imag, f_low, f_high, subcarrier_spacing):
     # print("Shapes", x.shape, freqs.shape)
     STATE['encoder_in'] = x[:, k_min:]
     if STATE['cycle_count'] < 600 and True:
-        out =  x[:, k_min:]
+        out =  x[:, k_min:] # Optionally output identity for stability
     else:
         out = STATE['encoder'](STATE['encoder_in'], freqs)
         out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12) # Unit average power
@@ -647,6 +741,9 @@ def stop_training_channel_model():
     artifact.add_file(channel_model_path)
     wandb.log_artifact(artifact)
     wandb.finish()
+
+def stop_validation_model():
+    pass
 
 def get_attention_map(model, x: torch.Tensor, freqs: torch.Tensor):
     # Forward through embedding layers
@@ -1056,3 +1153,64 @@ def log_evm_vs_time(step: int = None):
 
     except Exception as e:
         print(f"[Error] Failed to log EVM vs time: {e}")
+
+def plot_received_vs_predicted(received_symbols: torch.Tensor,
+                               predicted_symbols: torch.Tensor,
+                               step: int,
+                               freqs: torch.Tensor = None):
+    """
+    Plots the predicted vs received symbols on a constellation diagram,
+    computes EVM, and logs to wandb.
+
+    Args:
+        received_symbols (torch.Tensor): Actual received symbols [Nt, Nf]
+        predicted_symbols (torch.Tensor): Model-predicted received symbols [Nt, Nf]
+        step (int): Current training step for logging
+        freqs (torch.Tensor, optional): Frequencies corresponding to subcarriers [Nf] or [1, Nf]
+    """
+
+    # Compute EVM
+    evm = torch.mean((received_symbols.real - predicted_symbols.real) ** 2 +
+                     (received_symbols.imag - predicted_symbols.imag) ** 2).item()
+
+    # Detach and convert to numpy
+    recv_np = received_symbols.detach().cpu().numpy().flatten()
+    pred_np = predicted_symbols.detach().cpu().numpy().flatten()
+
+    # Convert freqs if provided
+    if freqs is not None:
+        freqs = freqs.detach().cpu().numpy()
+        if freqs.ndim == 2:
+            freqs = freqs[0]  # Take first symbol if batched
+        norm = colors.Normalize(vmin=freqs.min(), vmax=freqs.max())
+        colors_mapped = cm.viridis(norm(freqs))
+    else:
+        colors_mapped = None
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(6, 6))
+    if colors_mapped is not None and len(colors_mapped) == len(pred_np):
+        ax.scatter(pred_np.real, pred_np.imag, c=colors_mapped, s=10, label="Predicted", alpha=0.8)
+        sm = cm.ScalarMappable(norm=norm, cmap='viridis')
+        sm.set_array([])
+        cbar = fig.colorbar(sm, ax=ax)
+        cbar.set_label("Subcarrier Frequency (Hz)")
+    else:
+        ax.scatter(pred_np.real, pred_np.imag, s=10, label="Predicted", alpha=0.8)
+
+    ax.scatter(recv_np.real, recv_np.imag, s=10, label="Received", alpha=0.8, marker='x', color='red')
+
+    ax.set_title(f"Predicted vs Received Constellation @ Batch {step}\nEVM: {evm:.2e}")
+    ax.set_xlabel("Real")
+    ax.set_ylabel("Imag")
+    ax.legend()
+    ax.grid(True)
+    ax.set_aspect('equal')
+
+    # Save and log
+    os.makedirs("wandb_constellations", exist_ok=True)
+    plot_path = f"wandb_constellations/received_vs_predicted_step_{step}.png"
+    fig.savefig(plot_path, dpi=150)
+    wandb.log({"Predicted vs Received Constellation": wandb.Image(plot_path), "eval/evm_received_vs_pred": evm}, step=step)
+    plt.close(fig)
+    os.remove(plot_path)

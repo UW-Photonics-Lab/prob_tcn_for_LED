@@ -11,8 +11,11 @@ from scipy.signal import resample_poly
 from scipy import signal
 from scipy.signal import find_peaks
 import os
+import wandb
 from training_state import STATE
 import torch
+import matplotlib.cm as cm
+import matplotlib.colors as colors
 
 # Get logging
 from lab_scripts.logging_code import *
@@ -123,7 +126,7 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
     symbol_groups = np.array(real_symbol_groups) + np.array(imag_symbol_groups) * 1j
     STATE['sent_symbols'].append(torch.tensor(symbol_groups[:, -STATE['Nf']:]))
     N_t = symbol_groups.shape[0]
-    barker_code = np.array([1, -1, 1, -1, 1], dtype=float)
+    barker_code = np.array([1, 1, 1, 1, 1,-1, -1, 1, 1, -1, 1, -1, 1], dtype=float)
     barker_code = np.repeat(barker_code, BARKER_LENGTH // len(barker_code)) # Set as 1%
     IFFT_LENGTH = int((AWG_MEMORY_LENGTH - len(barker_code)) // N_t) 
 
@@ -302,7 +305,7 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
         normalized_carriers = carriers * scale
         normalized_data_subcarriers.append(normalized_carriers)
 
-    STATE['received_symbols'].append(torch.tensor(normalized_data_subcarriers))
+    STATE['received_symbols'].append(normalized_data_subcarriers)
     data_subcarriers = np.concatenate(normalized_data_subcarriers)
 
     '-----------------------------Channel Estimation ---------------------------------------------------------'
@@ -470,13 +473,102 @@ def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,
     STATE['frame_BER'] = BER
 
        # Call backprop and log loss
-    if 'encoder_out' in STATE and 'decoder_out' in STATE:
+    if 'encoder_out' in STATE and 'decoder_out' in STATE and STATE['train_model']:
         cancel_run_early = update_weights()
     elif 'cancel_channel_train' in STATE:
         cancel_run_early = STATE['cancel_channel_train']
+
+    elif STATE['validate_model']:
+        make_validate_plots(STATE['encoder_in'], STATE['decoder_out'], STATE['frame_BER'], STATE['run_model'], STATE['frequencies'])
+        cancel_run_early = False
+
     else:
         cancel_run_early = False
 
     SNR, PowerFactor = float(0), float(0) 
     
     return decided_bits_flat, float(BER), SNR, PowerFactor, cancel_run_early
+
+
+def make_validate_plots(encoder_in, decoder_out, frame_BER, run_model, freqs=None):
+    """
+    Logs EVM loss, frame BER, and constellation diagram to wandb.
+    If `freqs` is provided, colors the constellation by subcarrier frequency.
+    """
+    # Calculate EVM loss
+    evm = torch.mean(
+        (encoder_in.real - decoder_out.real) ** 2 + (encoder_in.imag - decoder_out.imag) ** 2
+    ).item()
+
+    # Choose prefix based on run_model
+    prefix = "validate/model_" if run_model else "validate/no_model_"
+
+    # Log EVM loss and BER
+    wandb.log({f"{prefix}evm_loss": evm})
+    wandb.log({f"{prefix}frame_BER": frame_BER})
+
+    # Detach and convert to numpy
+    encoder_np = encoder_in.detach().cpu().numpy()
+    decoder_np = decoder_out.detach().cpu().numpy()
+
+    # Create plot
+    fig, ax = plt.subplots(figsize=(6, 6))
+
+    if freqs is not None:
+        freqs = np.asarray(freqs)
+        if freqs.ndim == 2:
+            freqs = freqs[0]  # Pick first symbol if batched
+
+        norm = colors.Normalize(vmin=freqs.min(), vmax=freqs.max())
+        cmap = cm.viridis
+        colors_mapped = cmap(norm(freqs))
+
+        ax.scatter(
+            decoder_np.real.flatten(),
+            decoder_np.imag.flatten(),
+            c=colors_mapped,
+            s=10,
+            label="Decoder Out"
+        )
+
+        # Add colorbar
+        sm = cm.ScalarMappable(norm=norm, cmap=cmap)
+        sm.set_array([])
+        cbar = fig.colorbar(sm, ax=ax, pad=0.01)
+        cbar.set_label("Subcarrier Frequency (Hz)")
+    else:
+        ax.scatter(
+            decoder_np.real.flatten(),
+            decoder_np.imag.flatten(),
+            s=10,
+            label="Decoder Out"
+        )
+
+    ax.scatter(
+        encoder_np.real.flatten(),
+        encoder_np.imag.flatten(),
+        s=10,
+        c="gray",
+        alpha=0.5,
+        label="Encoder In"
+    )
+
+    ax.set_title(f"Constellation ({'Trained' if run_model else 'Untrained'})\nEVM: {evm:.2e}, BER: {frame_BER:.2f}")
+    ax.set_xlabel("Real")
+    ax.set_ylabel("Imag")
+    ax.legend()
+    ax.grid(True)
+
+    # Save and log
+    plot_path = f"wandb_constellations/{prefix}constellation.png"
+    os.makedirs(os.path.dirname(plot_path), exist_ok=True)
+    fig.savefig(plot_path, dpi=150)
+    wandb.log({f"{prefix}constellation": wandb.Image(plot_path)})
+    plt.close(fig)
+    if os.path.exists(plot_path):
+        os.remove(plot_path)
+    
+    if STATE['run_model']:
+        STATE['run_model'] = False
+    else:
+        STATE['run_model'] = True
