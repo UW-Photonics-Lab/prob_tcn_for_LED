@@ -1,4 +1,5 @@
 from training_state import STATE
+import h5py
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -18,10 +19,13 @@ import traceback
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
+STATE['train_model'] = False # Variable
+STATE['validate_model'] = False # Variable
+STATE['train_channel'] = True # Variable
 load_model = False # Variable
 LOAD_DIR = ""
 if load_model:
-    LOAD_DIR = r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\models\pickled_models\fluent-sea-1361" # Variable
+    LOAD_DIR = r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\models\pickled_models\radiant-cosmos-1385" # Variable
     with open(os.path.join(LOAD_DIR, "config.json"), "r") as f:
         hyperparams = json.load(f)
 
@@ -60,9 +64,7 @@ STATE['cycle_count'] = 0
 STATE['batch_count'] = 0
 STATE['encoder_out_buffer'] = []
 STATE['decoder_in_buffer'] = []
-STATE['train_model'] = False # Variable
-STATE['validate_model'] = False # Variable
-STATE['train_channel'] = True # Variable
+
 
 class FrequencyPositionalEmbedding(nn.Module):
     def __init__(self, d_model):
@@ -374,6 +376,7 @@ def train_channel_model_RY(real, imag):
     # Calculate loss
     predicted_symbols = STATE['channel_prediction']
     loss = evm_loss_func(predicted_symbols, out)
+    append_symbol_frame(STATE['last_sent_channel'], out, STATE['frequencies'])
     STATE['cycle_count'] += 1
     if loss is not None:
         STATE['loss_accumulator'].append(loss)
@@ -743,6 +746,7 @@ def stop_training_channel_model():
     wandb.finish()
 
 def stop_validation_model():
+    wandb.finish()
     pass
 
 def get_attention_map(model, x: torch.Tensor, freqs: torch.Tensor):
@@ -1214,3 +1218,59 @@ def plot_received_vs_predicted(received_symbols: torch.Tensor,
     wandb.log({"Predicted vs Received Constellation": wandb.Image(plot_path), "eval/evm_received_vs_pred": evm}, step=step)
     plt.close(fig)
     os.remove(plot_path)
+
+
+def append_symbol_frame(
+    sent, received, freqs,
+    h5_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\measurements.h5",
+    metadata: dict = None
+):
+    """
+    Append a sent/received symbol frame to an HDF5 database with auto-incremented frame index.
+
+    Args:
+        sent (Tensor or ndarray): [Nt, Nf] complex64 sent symbols
+        received (Tensor or ndarray): [Nt, Nf] complex64 received symbols
+        freqs (Tensor or ndarray): [Nf] float32 subcarrier frequencies
+        h5_path (str): path to .h5 file
+        metadata (dict): optional dictionary of scalar metadata (e.g., {'snr': 32.1})
+    """
+
+    # Convert to numpy
+    def to_numpy(x):
+        return x.detach().cpu().numpy() if isinstance(x, torch.Tensor) else x
+
+    sent = to_numpy(sent).astype(np.complex64)
+    received = to_numpy(received).astype(np.complex64)
+    freqs = to_numpy(freqs).astype(np.float32)
+
+    # Ensure parent directory exists
+    os.makedirs(os.path.dirname(h5_path), exist_ok=True)
+
+    # Open and append
+    with h5py.File(h5_path, "a") as f:
+        # Init frame_counter if missing
+        if "frame_counter" not in f.attrs:
+            f.attrs["frame_counter"] = 1
+
+        frame_id = int(f.attrs["frame_counter"])
+        group_name = f"frame_{frame_id:06d}"
+        grp = f.create_group(group_name)
+
+        # Store datasets
+        grp.create_dataset("sent", data=sent, compression="gzip")
+        grp.create_dataset("received", data=received, compression="gzip")
+        grp.create_dataset("freqs", data=freqs)
+
+        # Store metadata if provided
+        if metadata:
+            for key, value in metadata.items():
+                try:
+                    grp.attrs[key] = value
+                except Exception as e:
+                    print(f"Could not save metadata key '{key}': {e}")
+
+        # Increment counter
+        f.attrs["frame_counter"] = frame_id + 1
+
+    return frame_id
