@@ -46,7 +46,7 @@ pprint.pprint(config)
 # Set device
 if torch.cuda.is_available():
     device = torch.device("cuda")
-elif torch.mps.is_available():
+elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
     device = torch.device("mps") # for M chip Macs
 else:
     device = torch.device("cpu")
@@ -58,7 +58,7 @@ STATE['predicted_received_symbols'] = []
 
 STATE['cycle_count'] = 0
 STATE['batch_count'] = 0
-STATE['encoder_out_buffer'] = [] 
+STATE['encoder_out_buffer'] = []
 STATE['decoder_in_buffer'] = []
 STATE['train_model'] = False # Variable
 STATE['validate_model'] = False # Variable
@@ -114,7 +114,7 @@ class FrequencyEmbedding(nn.Module):
         freq_indices = torch.arange(STATE['Nf']).repeat(STATE['Nt']).reshape(STATE['Nt'], STATE['Nf'])
         freq_embed = self.embedding(freq_indices)  # [Nt, Nf, d_model]
         return x + freq_embed
-    
+
 
 class SymbolEmbedding(nn.Module):
     def __init__(self, d_model: int):
@@ -393,7 +393,7 @@ def train_channel_model_RY(real, imag):
                 STATE['channel_scheduler'].step(batch_avg_loss)
             else:
                 STATE['channel_scheduler'].step()
-            
+
             # Save final loss so that optuna can use it later
             with open("final_loss.txt", "w") as f:
                     f.write(str(batch_avg_loss.item()))
@@ -478,8 +478,8 @@ def run_encoder(real, imag, f_low, f_high, subcarrier_spacing):
         out = STATE['encoder'](STATE['encoder_in'], freqs)
         out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12) # Unit average power
     # Store out in STATE to preserve computational graph
-    STATE['encoder_out'] = out 
-    STATE['frequencies'] = freqs[0, :].detach() 
+    STATE['encoder_out'] = out
+    STATE['frequencies'] = freqs[0, :].detach()
     STATE['ML_time'] += (time.time() - start_time)
 
     # Attach back the zeros.
@@ -501,7 +501,7 @@ def differentiable_channel(encoder_out: torch.tensor, received_symbols: torch.te
     X = X.detach()
     Y = Y.detach()
     gram_matrix = X.t() @ X # [Nf, Nf]
-    
+
     cond = torch.linalg.cond(gram_matrix)
     if cond < 1e4:
         inverse_term = torch.linalg.inv(gram_matrix)
@@ -584,7 +584,7 @@ class StableLoss(nn.Module):
         super().__init__()
         self.schedule_fn = schedule_fn
 
-    
+
     def forward(self, encoder_out: torch.tensor, decoder_out: torch.tensor, true_symbols: torch.tensor, step: int):
 
         preservation_loss = torch.mean(torch.abs(encoder_out - true_symbols) ** 2)
@@ -834,7 +834,7 @@ def plot_SNR_vs_freq(step: int, save_path: str = None):
     except Exception as e:
         print(f"Failed to plot SNR vs Frequency at step {step}: {e}")
         traceback.print_exc()
-        
+
 
 
 
