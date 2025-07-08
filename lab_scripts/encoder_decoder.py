@@ -25,7 +25,7 @@ STATE['train_channel'] = True # Variable
 load_model = False # Variable
 LOAD_DIR = ""
 if load_model:
-    LOAD_DIR = r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\models\pickled_models\cosmic-pond-1395" # Variable
+    LOAD_DIR = r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\models\pickled_models\radiant-cosmos-1385" # Variable
     with open(os.path.join(LOAD_DIR, "config.json"), "r") as f:
         hyperparams = json.load(f)
 
@@ -35,18 +35,17 @@ else:
         hyperparams = yaml.safe_load(f)
 
 
-def start_wandb_session():
-    # Start Weights and Biases session
-    wandb.init(project="mldrivenpeled",
-            config=hyperparams)
-    config = wandb.config
+# Start Weights and Biases session
+wandb.init(project="mldrivenpeled",
+           config=hyperparams)
+config = wandb.config
 
-    print(f"WandB run info:")
-    print(f"  Name: {wandb.run.name}")
-    print(f"  ID: {wandb.run.id}")
-    print(f"  URL: {wandb.run.url}")
-    print("Chosen hyperparameters for this session:")
-    pprint.pprint(config)
+print(f"WandB run info:")
+print(f"  Name: {wandb.run.name}")
+print(f"  ID: {wandb.run.id}")
+print(f"  URL: {wandb.run.url}")
+print("Chosen hyperparameters for this session:")
+pprint.pprint(config)
 
 # Set device
 if torch.cuda.is_available():
