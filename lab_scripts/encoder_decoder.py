@@ -266,21 +266,6 @@ def evm_loss_func(true_symbols, predicted_symbols):
     return torch.mean((true_symbols.real - predicted_symbols.real) ** 2 +
                       (true_symbols.imag - predicted_symbols.imag) ** 2)
 
-
-def append_to_npz(npz_path, sent, received):
-    # sent, received: np.ndarray (2D, e.g. [Nt, Nf])
-    if os.path.exists(npz_path):
-        data = np.load(npz_path)
-        sent_arr = data['sent']
-        received_arr = data['received']
-        # Stack along a new axis (frame index)
-        sent_arr = np.concatenate([sent_arr, sent[None, ...]], axis=0)
-        received_arr = np.concatenate([received_arr, received[None, ...]], axis=0)
-    else:
-        sent_arr = sent[None, ...]
-        received_arr = received[None, ...]
-    np.savez(npz_path, sent=sent_arr, received=received_arr)
-
 STATE['run_model'] = True
 def validate_encoder(real, imag, f_low, f_high, subcarrier_spacing):
     real = torch.tensor(real, dtype=torch.float32, device=device)
@@ -289,15 +274,15 @@ def validate_encoder(real, imag, f_low, f_high, subcarrier_spacing):
     if STATE['run_model']:
         freqs = torch.arange(0, f_high, subcarrier_spacing, dtype=torch.float32, device=device)
         freqs = freqs.unsqueeze(0).repeat(STATE['Nt'], 1)
-  
+
         freqs = freqs[:, k_min:]
         x = real + 1j * imag
 
         STATE['encoder_in'] = x[:, k_min:]
         out = STATE['encoder'](STATE['encoder_in'], freqs)
         out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12) # Unit average power
-        STATE['encoder_out'] = out 
-        STATE['frequencies'] = freqs[0, :].detach() 
+        STATE['encoder_out'] = out
+        STATE['frequencies'] = freqs[0, :].detach()
 
         # Attach back the zeros.
         zeros = torch.zeros((out.shape[0], k_min), dtype=out.dtype, device=out.device)
@@ -312,7 +297,7 @@ def validate_encoder(real, imag, f_low, f_high, subcarrier_spacing):
 def validate_decoder(real, imag):
     # Reshape input to [Nt, Nf]
     Nt, Nf = STATE['encoder_out'].shape
-    if STATE['run_model'] :  
+    if STATE['run_model'] :
         real = torch.tensor(real, dtype=torch.float32, device=device).reshape(Nt, Nf)
         imag = torch.tensor(imag, dtype=torch.float32, device=device).reshape(Nt, Nf)
         x = real + 1j * imag
@@ -356,9 +341,9 @@ def train_channel_model_TX(real, imag, f_low, f_high, subcarrier_spacing):
     # Save prediction for loss calculation
     STATE['channel_prediction'] = STATE['channel_model'](out, freqs)
     out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
-    STATE['encoder_out'] = STATE['channel_prediction'] 
+    STATE['encoder_out'] = STATE['channel_prediction']
     STATE['last_sent_channel'] = out
-    STATE['frequencies'] = freqs[0, :].detach() 
+    STATE['frequencies'] = freqs[0, :].detach()
     # Attach back the zeros.
     zeros = torch.zeros((out.shape[0], k_min), dtype=out.dtype, device=out.device)
     out_full = torch.cat([zeros, out], dim=1)
