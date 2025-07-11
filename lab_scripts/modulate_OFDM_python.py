@@ -31,6 +31,8 @@ def get_constellation(mode: str):
             constellation = QPSK_Constellation()
         elif mode == "m5_apsk_constellation":
             constellation = RingShapedConstellation(filename=r'C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\lab_scripts\saved_constellations\m5_apsk_constellation.npy')
+        elif mode == "m6_apsk_constellation":
+            constellation = RingShapedConstellation(filename=r'C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\lab_scripts\saved_constellations\m6_apsk_constellation.npy')
         return constellation
 
 def modulate_data_OFDM(mode: str, 
@@ -182,7 +184,7 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
                                      Nt: int) -> list:
     '''Converts received y(t) into symbols with optional debugging plots'''
 
-    debug_plots = False
+    debug_plots = True
     PLOT_SNR = False
 
     k_min = int(np.floor(f_min / subcarrier_delta_f))
@@ -502,21 +504,22 @@ def make_validate_plots(encoder_in, decoder_out, frame_BER, run_model, freqs=Non
         (encoder_in.real - decoder_out.real) ** 2 + (encoder_in.imag - decoder_out.imag) ** 2
     ).item()
 
-    STATE['frame_evm_accumulator'].append(evm)
-    STATE["frame_BER_accumulator"].append(frame_BER)
-
-    # Get running average
-
-    running_evm = np.mean(np.array(STATE['frame_evm_accumulator'])) / len(STATE['frame_evm_accumulator'])
-    running_ber = np.mean(np.array(STATE['frame_BER_accumulator'])) / len(STATE['frame_BER_accumulator'])
 
     # Choose prefix based on run_model
     prefix = "validate/model_" if run_model else "validate/no_model_"
 
+    # Get running average
+    if run_model:
+        STATE['frame_evm_accumulator'].append(evm)
+        STATE["frame_BER_accumulator"].append(frame_BER)
+        running_evm = np.mean(np.array(STATE['frame_evm_accumulator']))
+        running_ber = np.mean(np.array(STATE['frame_BER_accumulator']))
+        wandb.log({f"{prefix}running_evm_loss": running_evm})
+        wandb.log({f"{prefix}running_frame_BER": running_ber})
+   
+
     wandb.log({f"{prefix}evm_loss": evm})
     wandb.log({f"{prefix}frame_BER": frame_BER})
-    wandb.log({f"{prefix}running_evm_loss": running_evm})
-    wandb.log({f"{prefix}running_frame_BER": running_ber})
     encoder_np = encoder_in.detach().cpu().numpy()
     decoder_np = decoder_out.detach().cpu().numpy()
 
