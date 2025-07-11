@@ -13,3 +13,6 @@ dropout: 0.04
 lr: 0.0002650369494496869
 modulator: m5_apsk_constellation
 save_model_frequency: 500
+pre_layer_norm: false
+scheduler_type: reduce_lr_on_plateu
+weight_init: default
