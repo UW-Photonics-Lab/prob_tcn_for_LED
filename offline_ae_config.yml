@@ -4,7 +4,7 @@ Nf: 370
 flow: 300000
 fhigh: 4e6
 subcarrier_spacing: 1e4
-epochs: 1000
+epochs: 200
 d_model: 128
 dim_feedforward: 256
 nhead: 4
@@ -16,3 +16,5 @@ save_model_frequency: 500
 pre_layer_norm: false
 scheduler_type: reduce_lr_on_plateu
 weight_init: default
+freq_embed_type: sinusoidal
+normalize_freq: true

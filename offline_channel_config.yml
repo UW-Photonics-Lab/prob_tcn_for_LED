@@ -16,3 +16,5 @@ num_symbols_per_frame: 1
 pre_layer_norm: false
 scheduler_type: reduce_lr_on_plateu
 weight_init: default
+freq_embed_type: none
+normalize_freq: false

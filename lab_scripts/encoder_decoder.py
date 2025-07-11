@@ -67,10 +67,11 @@ STATE['decoder_in_buffer'] = []
 
 
 class FrequencyPositionalEmbedding(nn.Module):
-    def __init__(self, d_model):
+    def __init__(self, d_model, normalize=True):
         super().__init__()
         assert d_model % 2 == 0
         self.d_model = d_model
+        self.normalize = normalize
 
     def forward(self, x, freq):
         '''
@@ -82,6 +83,9 @@ class FrequencyPositionalEmbedding(nn.Module):
         '''
 
         Nt, Nf, _ = x.shape
+
+        if self.normalize:
+            freq = 2 * (freq - freq.min()) / (freq.max() - freq.min()) - 1 # [-1, 1]
 
         # Frequency embedding
         div_term = torch.exp(
@@ -96,7 +100,7 @@ class FrequencyPositionalEmbedding(nn.Module):
         x = x + pe[:x.size(0)]
         return x
 
-class FrequencyEmbedding(nn.Module):
+class FrequencyLearnedEmbedding(nn.Module):
     def __init__(self, d_model: int):
         super().__init__()
         self.embedding = nn.Embedding(STATE['Nf'], d_model)
@@ -132,18 +136,27 @@ class SymbolEmbedding(nn.Module):
         return self.linear(combined) # [Nt, Nf, 2] -> [Nt, Nf, d_model]
 
 class TransformerEncoder(nn.Module):
-    def __init__(self, d_model, nhead, nlayers, dim_feedforward, dropout, norm_first=config.pre_layer_norm):
+    def __init__(self, d_model, nhead, nlayers, dim_feedforward, dropout, norm_first=config.pre_layer_norm,
+        freq_embed_type="sinusoidal", normalize_freq=True):
         super().__init__()
-        self.frequency_embed = FrequencyPositionalEmbedding(d_model)
+        self.freq_embed_type = freq_embed_type
+        if freq_embed_type == "sinusoidal":
+            self.freq_embed = FrequencyPositionalEmbedding(d_model, normalize=normalize_freq)
+        elif freq_embed_type == "learned":
+            self.freq_embed = FrequencyLearnedEmbedding(STATE['Nf'], d_model)
+        else:
+            self.freq_embed = None  # no frequency embedding
+
         self.symbol_embed = SymbolEmbedding(d_model)
         encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward=dim_feedforward, batch_first=True, dropout=dropout, norm_first=norm_first)
         self.transformer = nn.TransformerEncoder(encoder_layer, nlayers)
         self.output = nn.Linear(d_model, 2)
 
     def forward(self, x: torch.tensor, freqs: torch.tensor) -> torch.tensor:
-        embedded_symbols = self.symbol_embed(x) # [Nt, Nf, d_model]
-        embedded_symbols = self.frequency_embed(embedded_symbols, freqs) # [Nt, Nf, d_model] testing no frequency embedding
-        out = self.transformer(embedded_symbols) # [Nt, Nf, d_model]
+        out = self.symbol_embed(x) # [Nt, Nf, d_model]
+        if self.freq_embed_type != "none":
+            out = self.freq_embed(out, freqs)  # [Nt, Nf, d_model]
+        out = self.transformer(out) # [Nt, Nf, d_model]
         out = self.output(out) #[Nt, Nf, 2]
         return out[..., 0] + 1j * out[..., 1] # Real and Imag
 
@@ -190,7 +203,9 @@ else:
                                 nhead=config.nhead,
                                 nlayers=config.nlayers,
                                 dim_feedforward=config.dim_feedforward,
-                                dropout=config.dropout).to(device)
+                                dropout=config.dropout,
+                                freq_embed_type=config.freq_embed_type,
+                                normalize_freq=config.normalize_freq).to(device)
 
     decoder = TransformerDecoder(d_model=config.d_model,
                                 nhead=config.nhead,
@@ -202,7 +217,9 @@ else:
                                 nhead=config.nhead,
                                 nlayers=config.nlayers,
                                 dim_feedforward=config.dim_feedforward,
-                                dropout=config.dropout).to(device)
+                                dropout=config.dropout,
+                                freq_embed_type=config.freq_embed_type,
+                                normalize_freq=config.normalize_freq).to(device)
 
 # encoder = encoder.half()
 # decoder = decoder.half()

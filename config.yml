@@ -17,3 +17,5 @@ pre_layer_norm: false
 save_model_frequency: 500
 scheduler_type: reduce_lr_on_plateu
 weight_init: default
+freq_embed_type: sinusoidal
+normalize_freq: true
