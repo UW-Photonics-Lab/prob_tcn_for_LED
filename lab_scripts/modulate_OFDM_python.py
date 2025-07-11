@@ -24,6 +24,8 @@ from lab_scripts.logging_code import *
 STATE['sent_symbols'] = []
 STATE['received_symbols'] = []
 STATE['channel_estimates'] = []
+STATE["frame_BER_accumulator"] = [] # Use to estimate BER over many frames
+STATE['frame_evm_accumulator'] = []
 def get_constellation(mode: str):
         if mode == "qpsk":
             constellation = QPSK_Constellation()
@@ -500,29 +502,33 @@ def make_validate_plots(encoder_in, decoder_out, frame_BER, run_model, freqs=Non
         (encoder_in.real - decoder_out.real) ** 2 + (encoder_in.imag - decoder_out.imag) ** 2
     ).item()
 
+    STATE['frame_evm_accumulator'].append(evm)
+    STATE["frame_BER_accumulator"].append(frame_BER)
+
+    # Get running average
+
+    running_evm = np.mean(np.array(STATE['frame_evm_accumulator'])) / len(STATE['frame_evm_accumulator'])
+    running_ber = np.mean(np.array(STATE['frame_BER_accumulator'])) / len(STATE['frame_BER_accumulator'])
+
     # Choose prefix based on run_model
     prefix = "validate/model_" if run_model else "validate/no_model_"
 
-    # Log EVM loss and BER
     wandb.log({f"{prefix}evm_loss": evm})
     wandb.log({f"{prefix}frame_BER": frame_BER})
-
-    # Detach and convert to numpy
+    wandb.log({f"{prefix}running_evm_loss": running_evm})
+    wandb.log({f"{prefix}running_frame_BER": running_ber})
     encoder_np = encoder_in.detach().cpu().numpy()
     decoder_np = decoder_out.detach().cpu().numpy()
 
-    # Create plot
+ 
     fig, ax = plt.subplots(figsize=(6, 6))
-
     if freqs is not None:
         freqs = np.asarray(freqs)
         if freqs.ndim == 2:
             freqs = freqs[0]  # Pick first symbol if batched
-
         norm = colors.Normalize(vmin=freqs.min(), vmax=freqs.max())
         cmap = cm.viridis
         colors_mapped = cmap(norm(freqs))
-
         ax.scatter(
             decoder_np.real.flatten(),
             decoder_np.imag.flatten(),
@@ -530,8 +536,6 @@ def make_validate_plots(encoder_in, decoder_out, frame_BER, run_model, freqs=Non
             s=10,
             label="Decoder Out"
         )
-
-        # Add colorbar
         sm = cm.ScalarMappable(norm=norm, cmap=cmap)
         sm.set_array([])
         cbar = fig.colorbar(sm, ax=ax, pad=0.01)
