@@ -101,9 +101,9 @@ class FrequencyPositionalEmbedding(nn.Module):
         return x
 
 class FrequencyLearnedEmbedding(nn.Module):
-    def __init__(self, d_model: int):
+    def __init__(self, d_model: int, Nf):
         super().__init__()
-        self.embedding = nn.Embedding(STATE['Nf'], d_model)
+        self.embedding = nn.Embedding(Nf, d_model)
 
     def forward(self, x, freqs: torch.Tensor):
         """
@@ -113,11 +113,12 @@ class FrequencyLearnedEmbedding(nn.Module):
         Returns:
             [Nt, Nf, d_model]     - embedded symbols + freq info
         """
+        Nt, Nf, _ = x.shape
         if freqs.ndim == 1:
             # Expand to [1, Nf] for batch compatibility
             freqs = freqs.unsqueeze(0)
-        assert freqs.shape[1] == STATE['Nf']
-        freq_indices = torch.arange(STATE['Nf']).repeat(STATE['Nt']).reshape(STATE['Nt'], STATE['Nf'])
+        assert freqs.shape[1] == Nf
+        freq_indices = torch.arange(Nf).repeat(Nt).reshape(Nt, Nf).to(device=x.device)
         freq_embed = self.embedding(freq_indices)  # [Nt, Nf, d_model]
         return x + freq_embed
 
@@ -136,14 +137,14 @@ class SymbolEmbedding(nn.Module):
         return self.linear(combined) # [Nt, Nf, 2] -> [Nt, Nf, d_model]
 
 class TransformerEncoder(nn.Module):
-    def __init__(self, d_model, nhead, nlayers, dim_feedforward, dropout, norm_first=config.pre_layer_norm,
-        freq_embed_type="sinusoidal", normalize_freq=True):
+    def __init__(self, d_model, nhead, nlayers, dim_feedforward, dropout, freq_embed_type, normalize_freq, norm_first=config.pre_layer_norm,
+        Nf=370):
         super().__init__()
         self.freq_embed_type = freq_embed_type
         if freq_embed_type == "sinusoidal":
             self.freq_embed = FrequencyPositionalEmbedding(d_model, normalize=normalize_freq)
         elif freq_embed_type == "learned":
-            self.freq_embed = FrequencyLearnedEmbedding(STATE['Nf'], d_model)
+            self.freq_embed = FrequencyLearnedEmbedding(d_model, Nf)
         else:
             self.freq_embed = None  # no frequency embedding
 
