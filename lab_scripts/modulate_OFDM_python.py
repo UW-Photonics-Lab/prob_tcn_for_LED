@@ -33,6 +33,8 @@ def get_constellation(mode: str):
             constellation = RingShapedConstellation(filename=r'C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\lab_scripts\saved_constellations\m5_apsk_constellation.npy')
         elif mode == "m6_apsk_constellation":
             constellation = RingShapedConstellation(filename=r'C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\lab_scripts\saved_constellations\m6_apsk_constellation.npy')
+        elif mode == "m7_apsk_constellation":
+            constellation = RingShapedConstellation(filename=r'C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\lab_scripts\saved_constellations\m7_apsk_constellation.npy')
         return constellation
 
 def modulate_data_OFDM(mode: str, 
@@ -184,7 +186,7 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
                                      Nt: int) -> list:
     '''Converts received y(t) into symbols with optional debugging plots'''
 
-    debug_plots = True
+    debug_plots = False
     PLOT_SNR = False
 
     k_min = int(np.floor(f_min / subcarrier_delta_f))

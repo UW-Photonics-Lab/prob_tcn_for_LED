@@ -1,4 +1,5 @@
 from training_state import STATE
+from noisy_state import NOISY_STATE
 import h5py
 import torch
 import torch.nn as nn
@@ -21,11 +22,13 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 
 STATE['train_model'] = False # Variable
 STATE['validate_model'] = False # Variable
-STATE['train_channel'] = True # Variable
+STATE['train_channel'] = False # Variable
 load_model = False # Variable
 LOAD_DIR = ""
 if load_model:
-    LOAD_DIR = r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\models\pickled_models\radiant-cosmos-1385" # Variable
+    model_name = "lemon-capybara-1905" # Variable
+    base_dir = r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\models\pickled_models"
+    LOAD_DIR = os.path.join(base_dir, model_name) 
     with open(os.path.join(LOAD_DIR, "config.json"), "r") as f:
         hyperparams = json.load(f)
 
@@ -34,11 +37,16 @@ else:
     with open(config_path, "r") as f:
         hyperparams = yaml.safe_load(f)
 
-
 # Start Weights and Biases session
 wandb.init(project="mldrivenpeled",
            config=hyperparams)
 config = wandb.config
+
+if load_model and STATE['validate_model']:
+    wandb.run.tags = list(wandb.run.tags) + ["validate"]
+    if wandb.run.notes == None:
+        wandb.run.notes = ""
+    wandb.run.notes += wandb.run.notes + f"\n Validate model {model_name}"
 
 print(f"WandB run info:")
 print(f"  Name: {wandb.run.name}")
@@ -186,7 +194,9 @@ if load_model:
                                 nhead=remote_config['nhead'],
                                 nlayers=remote_config['nlayers'],
                                 dim_feedforward=remote_config['dim_feedforward'],
-                                dropout=remote_config['dropout'])
+                                dropout=remote_config['dropout'],
+                                freq_embed_type=remote_config['freq_embed_type'],
+                                normalize_freq=remote_config['normalize_freq'])
     encoder.load_state_dict(torch.load(os.path.join(LOAD_DIR, "encoder_weights.pth")))
     encoder.eval()
 
@@ -333,6 +343,78 @@ def validate_decoder(real, imag):
         STATE['decoder_out'] = out
         out = out.flatten()
         return out.real.detach().cpu().contiguous().numpy().tolist(), out.imag.detach().cpu().contiguous().numpy().tolist()
+
+NOISY_SAMPLE_SIZE = 32 #Arbitrary
+def symbols_for_noise():
+    if "distinct_symbol" not in NOISY_STATE:
+        NOISY_STATE["distinct_symbol"] = 0
+        NOISY_STATE["symbol_iteration"] = 0
+        make_new = True
+    else:
+        if NOISY_STATE["symbol_iteration"] == NOISY_SAMPLE_SIZE:
+            NOISY_STATE["distinct_symbol"] += 1
+            NOISY_STATE["symbol_iteration"] = 0
+            make_new = True
+        else:
+            NOISY_STATE["symbol_iteration"] += 1
+            make_new = False
+
+
+    if not make_new:
+        return NOISY_STATE["prior_symbol"]
+    
+    Nt = STATE['Nt']
+    Nf = STATE['Nf']
+
+    # Symbol range -4,4
+    a = -4
+    b = 4
+    real_part = (b-a)*torch.rand(Nt, Nf)+a
+    imag_part = (b-a)*torch.rand(Nt, Nf)+a
+    out = real_part + 1j * imag_part
+    out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12) #Normalize and ensure numerical stability    
+    NOISY_STATE["prior_symbol"] = out
+    return out
+
+def solve_channel_noise_TX(real, imag, f_low, f_high, subcarrier_spacing):
+    # real = torch.tensor(real, dtype=torch.float32, device=device)
+    # imag = torch.tensor(imag, dtype=torch.float32, device=device)
+    Nt = STATE["Nt"]
+    Nf = STATE["Nf"]
+    out = symbols_for_noise()
+
+    freqs = torch.tensor(np.arange(0, f_high, subcarrier_spacing), dtype=torch.float32, device=device) # Start at 0 frequency for shape matching
+
+    # Update freqs to match shape [Nt, Nf]
+    freqs = freqs.unsqueeze(0).repeat(STATE['Nt'], 1)
+    k_min = int(np.floor(f_low / subcarrier_spacing))
+    freqs = freqs[:, k_min:]
+    # out = real + 1j * imag
+    # out = out[:, k_min:]
+    STATE['encoder_in'] = out
+
+    # Save prediction for loss calculation
+    out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
+    STATE['last_sent_channel'] = out
+    STATE['frequencies'] = freqs[0, :].detach()
+
+    # Attach back the zeros.
+    zeros = torch.zeros((out.shape[0], k_min), dtype=out.dtype, device=out.device)
+    out_full = torch.cat([zeros, out], dim=1)
+    return out_full.real.detach().cpu().numpy().tolist(), out_full.imag.detach().cpu().numpy().tolist()
+
+def solve_channel_noise_RY(real, imag):
+    real = torch.tensor(real, dtype=torch.float32, device=device).reshape(STATE['Nt'], STATE['Nf'])
+    imag = torch.tensor(imag, dtype=torch.float32, device=device).reshape(STATE['Nt'], STATE['Nf'])
+    out = real + 1j * imag
+    STATE['decoder_in'] = out
+    # Update local dataset
+    # append_to_npz(r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_inputs_outputs.npz", STATE["last_sent_channel"], out)
+
+    append_symbol_frame(STATE['last_sent_channel'], out, STATE['frequencies'],noise_sample_indexing=True)
+    STATE['decoder_out'] = out
+    out = out.flatten()
+    return out.real.detach().cpu().contiguous().numpy().tolist(), out.imag.detach().cpu().contiguous().numpy().tolist()
 
 def train_channel_model_TX(real, imag, f_low, f_high, subcarrier_spacing):
     # real = torch.tensor(real, dtype=torch.float32, device=device)
@@ -1225,8 +1307,9 @@ def plot_received_vs_predicted(received_symbols: torch.Tensor,
 
 def append_symbol_frame(
     sent, received, freqs,
-    h5_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\measurements.h5",
-    metadata: dict = None
+    h5_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\noise_measurements.h5",
+    metadata: dict = None,
+    noise_sample_indexing = False
 ):
     """
     Append a sent/received symbol frame to an HDF5 database with auto-incremented frame index.
@@ -1237,6 +1320,7 @@ def append_symbol_frame(
         freqs (Tensor or ndarray): [Nf] float32 subcarrier frequencies
         h5_path (str): path to .h5 file
         metadata (dict): optional dictionary of scalar metadata (e.g., {'snr': 32.1})
+        noise_sample_indexing: boolean for whether we're measuring noise or not
     """
 
     # Convert to numpy
@@ -1257,8 +1341,18 @@ def append_symbol_frame(
             f.attrs["frame_counter"] = 1
 
         frame_id = int(f.attrs["frame_counter"])
-        group_name = f"frame_{frame_id:06d}"
-        grp = f.create_group(group_name)
+        if not noise_sample_indexing:
+            group_name = f"frame_{frame_id:06d}"
+            grp = f.create_group(group_name)
+        else:
+            modified_symbol_num = str(NOISY_STATE['distinct_symbol'])
+            modified_iter_inum = str(NOISY_STATE['symbol_iteration'])
+            for zero in range(6-len(modified_symbol_num)): #Arbitrarily chosen because unlikely to draw >999999 samples
+                modified_symbol_num = "0" + modified_symbol_num
+            for zero_ in range(int(np.log10(NOISY_SAMPLE_SIZE))+1-len(modified_iter_inum)):
+                modified_iter_inum = "0" + modified_iter_inum
+            group_name = f"symbol_{modified_symbol_num}_iteration_{modified_iter_inum}"
+            grp = f.create_group(group_name)
 
         # Store datasets
         grp.create_dataset("sent", data=sent, compression="gzip")
