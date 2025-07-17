@@ -22,7 +22,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 
 STATE['train_model'] = False # Variable
 STATE['validate_model'] = False # Variable
-STATE['train_channel'] = False # Variable
+STATE['train_channel'] = True # Variable
 load_model = False # Variable
 LOAD_DIR = ""
 if load_model:
@@ -351,12 +351,12 @@ def symbols_for_noise():
         NOISY_STATE["symbol_iteration"] = 0
         make_new = True
     else:
+        NOISY_STATE["symbol_iteration"] += 1
         if NOISY_STATE["symbol_iteration"] == NOISY_SAMPLE_SIZE:
             NOISY_STATE["distinct_symbol"] += 1
             NOISY_STATE["symbol_iteration"] = 0
             make_new = True
         else:
-            NOISY_STATE["symbol_iteration"] += 1
             make_new = False
 
 
@@ -375,6 +375,77 @@ def symbols_for_noise():
     out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12) #Normalize and ensure numerical stability    
     NOISY_STATE["prior_symbol"] = out
     return out
+
+
+STATE['carrier_counter'] = 0
+def test_channel_ici_TX(real, imag, f_low, f_high, subcarrier_spacing):
+    test_carrier_indices = torch.arange(STATE['Nf'])[::10]
+    STATE['test_carrier_indices'] = test_carrier_indices
+    try:
+        curr_carrierIdx = test_carrier_indices[STATE['carrier_counter']]
+    except Exception as e:
+        print("Too many cycles!")
+    # Set to energy 1 
+    out = torch.zeros(STATE['Nt'], STATE['Nf'], device=device, dtype=torch.complex64)
+    out[:, curr_carrierIdx] = 1.0 + 0j
+    # out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
+    STATE['last_sent_channel'] = out
+    print(out)
+    # Attach back the zeros.
+    k_min = int(np.floor(f_low / subcarrier_spacing))
+    zeros = torch.zeros((out.shape[0], k_min), dtype=out.dtype, device=out.device)
+    out_full = torch.cat([zeros, out], dim=1)
+    return out_full.real.detach().cpu().numpy().tolist(), out_full.imag.detach().cpu().numpy().tolist()
+
+def plot_histograms(energy_np, log_energy_np):
+    fig, axs = plt.subplots(1, 2, figsize=(10, 3), dpi=100)
+
+    axs[0].bar(np.arange(len(energy_np)), energy_np, color="steelblue")
+    axs[0].set_title("Linear Energy per Carrier")
+    axs[0].set_xlabel("Subcarrier Index")
+    axs[0].set_ylabel("Energy")
+
+    axs[1].bar(np.arange(len(log_energy_np)), log_energy_np, color="darkorange")
+    axs[1].set_title("Log10 Energy per Carrier")
+    axs[1].set_xlabel("Subcarrier Index")
+    axs[1].set_ylabel("log10(Energy)")
+
+    fig.tight_layout()
+    return fig
+
+def test_channel_ici_RY(real, imag):
+    real = torch.tensor(real, dtype=torch.float32, device=device).reshape(STATE['Nt'], STATE['Nf'])
+    imag = torch.tensor(imag, dtype=torch.float32, device=device).reshape(STATE['Nt'], STATE['Nf'])
+    out = real + 1j * imag
+    energy_per_carrier = torch.mean(torch.square(out.abs()), dim=0)
+    log_energy_per_carrier = torch.log10(energy_per_carrier + 1e-20)
+    # Determine if energy leaked into other carriers
+    curr_carrier_idx = STATE['test_carrier_indices'][STATE['carrier_counter']]
+    curr_carrier = out[:, curr_carrier_idx].clone()
+    energy_at_carrier = torch.square(out[:, curr_carrier_idx].abs()).item()
+    out[:, curr_carrier_idx] = 0
+    total_energy = torch.mean(torch.square(out.abs()), dim=1).item()
+    relative_ICI = total_energy / energy_at_carrier
+  
+
+    # Convert to NumPy
+    energy_np = energy_per_carrier.detach().cpu().numpy()
+    log_energy_np = log_energy_per_carrier.detach().cpu().numpy()
+
+    fig = plot_histograms(energy_np, log_energy_np)
+
+    wandb.log({
+        "Carrier energy histograms": wandb.Image(fig)
+    }, step=STATE['carrier_counter'])
+
+    plt.close(fig)
+    print(curr_carrier)
+    print(f"Total energy not at index {curr_carrier_idx}: {total_energy: .3f} | Energy at carrier {energy_at_carrier}")
+    print(f"Relative ICI {relative_ICI}")
+    print(f"Sent Carrier {STATE['last_sent_channel'][0, curr_carrier_idx].item()} | received {curr_carrier[0].item()}")
+    STATE['carrier_counter'] += 1
+    out = out.flatten()
+    return out.real.detach().cpu().contiguous().numpy().tolist(), out.imag.detach().cpu().contiguous().numpy().tolist()
 
 def solve_channel_noise_TX(real, imag, f_low, f_high, subcarrier_spacing):
     # real = torch.tensor(real, dtype=torch.float32, device=device)
@@ -427,20 +498,16 @@ def train_channel_model_TX(real, imag, f_low, f_high, subcarrier_spacing):
     imag_part = torch.randn(Nt, Nf)
     out = real_part + 1j * imag_part
     out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
-
     freqs = torch.tensor(np.arange(0, f_high, subcarrier_spacing), dtype=torch.float32, device=device) # Start at 0 frequency for shape matching
 
     # Update freqs to match shape [Nt, Nf]
     freqs = freqs.unsqueeze(0).repeat(STATE['Nt'], 1)
     k_min = int(np.floor(f_low / subcarrier_spacing))
     freqs = freqs[:, k_min:]
-    # out = real + 1j * imag
-    # out = out[:, k_min:]
     STATE['encoder_in'] = out
 
     # Save prediction for loss calculation
     STATE['channel_prediction'] = STATE['channel_model'](out, freqs)
-    out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
     STATE['encoder_out'] = STATE['channel_prediction']
     STATE['last_sent_channel'] = out
     STATE['frequencies'] = freqs[0, :].detach()
@@ -455,8 +522,6 @@ def train_channel_model_RY(real, imag):
     imag = torch.tensor(imag, dtype=torch.float32, device=device).reshape(STATE['Nt'], STATE['Nf'])
     out = real + 1j * imag
     STATE['decoder_in'] = out
-    # Update local dataset
-    # append_to_npz(r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_inputs_outputs.npz", STATE["last_sent_channel"], out)
 
     # Calculate loss
     predicted_symbols = STATE['channel_prediction']
@@ -1307,7 +1372,7 @@ def plot_received_vs_predicted(received_symbols: torch.Tensor,
 
 def append_symbol_frame(
     sent, received, freqs,
-    h5_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\noise_measurements.h5",
+    h5_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\ici_channel_measurements.h5",
     metadata: dict = None,
     noise_sample_indexing = False
 ):

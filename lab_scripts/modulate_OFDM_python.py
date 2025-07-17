@@ -130,25 +130,34 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
 
     '''
     symbol_groups = np.array(real_symbol_groups) + np.array(imag_symbol_groups) * 1j
+    print("symbol groups", symbol_groups)
     STATE['sent_symbols'].append(torch.tensor(symbol_groups[:, -STATE['Nf']:]))
     N_t = symbol_groups.shape[0]
     barker_code = np.array([1, 1, 1, 1, 1,-1, -1, 1, 1, -1, 1, -1, 1], dtype=float)
     barker_code = np.repeat(barker_code, BARKER_LENGTH // len(barker_code)) # Set as 1%
-    IFFT_LENGTH = int((AWG_MEMORY_LENGTH - len(barker_code)) // N_t) 
 
+    SYMBOL_LENGTH = (AWG_MEMORY_LENGTH - len(barker_code)) / N_t
+    IFFT_LENGTH = int(SYMBOL_LENGTH * (1 - CP_RATIO))
+    IFFT_LENGTH -= IFFT_LENGTH % 2 # Force to be even
     '''CP'''
-    IFFT_LENGTH = int((AWG_MEMORY_LENGTH - len(barker_code)) // (N_t * (1 + CP_RATIO)))
-    cyclic_prefix_length = int(IFFT_LENGTH * CP_RATIO)
+
+
+    # Upsample in multiples of two zeros on each side to satisy Hermitian symmetry
+    M = IFFT_LENGTH // 2 - 1
+    number_of_zeros = M - symbol_groups.shape[1]
+    padding_zeros = np.zeros(shape=(symbol_groups.shape[0], number_of_zeros))
+    symbol_groups = np.hstack((symbol_groups, padding_zeros))
 
     # Add DC offset, Nyquist carrier, and conjugate symmetry
     symbol_groups_conjugate_flipped = np.conj(symbol_groups)[:, ::-1] # Flip along axis=1
+
     DC_nyquist = np.zeros(shape=(symbol_groups.shape[0], 1)) # Both are set to 0
     full_symbols = np.hstack((DC_nyquist, symbol_groups, DC_nyquist, symbol_groups_conjugate_flipped)) # [Nt, Nf]
     
-    SYMBOL_LENGTH = int((AWG_MEMORY_LENGTH - len(barker_code)) / N_t)
-    IFFT_LENGTH = int(SYMBOL_LENGTH * (1 - CP_RATIO))
+    assert full_symbols.shape[1] == IFFT_LENGTH, "Symbol length mismatch after padding and symmetry."
+
     cyclic_prefix_length = int(SYMBOL_LENGTH * CP_RATIO)
-    x_t_no_cp = np.real(np.fft.ifft(full_symbols, axis=1, n=IFFT_LENGTH))
+    x_t_no_cp = np.real(np.fft.ifft(full_symbols, axis=1))
 
     # Add cyclic prefix per symbol
     x_t_groups = []
