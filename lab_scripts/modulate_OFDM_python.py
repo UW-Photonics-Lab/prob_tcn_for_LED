@@ -130,7 +130,6 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
 
     '''
     symbol_groups = np.array(real_symbol_groups) + np.array(imag_symbol_groups) * 1j
-    print("symbol groups", symbol_groups)
     STATE['sent_symbols'].append(torch.tensor(symbol_groups[:, -STATE['Nf']:]))
     N_t = symbol_groups.shape[0]
     barker_code = np.array([1, 1, 1, 1, 1,-1, -1, 1, 1, -1, 1, -1, 1], dtype=float)

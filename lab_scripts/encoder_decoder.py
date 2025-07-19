@@ -294,6 +294,58 @@ def evm_loss_func(true_symbols, predicted_symbols):
     return torch.mean((true_symbols.real - predicted_symbols.real) ** 2 +
                       (true_symbols.imag - predicted_symbols.imag) ** 2)
 
+
+
+STATE['run_model'] = True
+def validate_ici_matrix_TX(real, imag, f_low, f_high, subcarrier_spacing):
+    real = torch.tensor(real, dtype=torch.float32, device=device)
+    imag = torch.tensor(imag, dtype=torch.float32, device=device)
+    freqs = torch.arange(0, f_high, subcarrier_spacing, dtype=torch.float32, device=device)
+    freqs = freqs.unsqueeze(0).repeat(STATE['Nt'], 1)
+    k_min = int(np.floor(f_low / subcarrier_spacing))
+    freqs = freqs[:, k_min:]
+    STATE['frequencies'] = freqs[0, :].detach()
+    # No model
+    out = real + 1j * imag
+    
+    out = out[:, k_min:]
+
+    STATE['encoder_in'] = out
+    STATE['encoder_out'] = out
+    return  out.real.detach().cpu().numpy().tolist(), out.imag.detach().cpu().numpy().tolist()
+
+
+def validate_ici_matrix_RY(real, imag):
+    # Reshape input to [Nt, Nf]
+    Nt, Nf = STATE['encoder_out'].shape
+    if STATE['run_model'] :
+        real = torch.tensor(real, dtype=torch.float32, device=device).reshape(Nt, Nf)
+        imag = torch.tensor(imag, dtype=torch.float32, device=device).reshape(Nt, Nf)
+        out = real + 1j * imag
+        STATE['decoder_in'] = out
+        
+        # Load in ICI matrix
+        H_ici = torch.tensor(np.load(r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\saved_models\ici_matrix.npy"), device=device)
+
+        H_ici_inv = torch.linalg.inv(H_ici)
+        print("Average Power Before Matrix", out.abs().square().mean(dim=1))
+        out = out @ H_ici_inv # [Nt, Nf]
+        print("Average Power with Matrix", out.abs().square().mean(dim=1))
+        out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
+        STATE['decoder_out'] = out
+        out = out.flatten() # Must flatten along batch dimension to output from labview
+        return out.real.detach().cpu().contiguous().numpy().tolist(), out.imag.detach().cpu().contiguous().numpy().tolist()
+    else:
+        # No model
+        real = torch.tensor(real, dtype=torch.float32, device=device).reshape(Nt, Nf)
+        imag = torch.tensor(imag, dtype=torch.float32, device=device).reshape(Nt, Nf)
+        out = real + 1j * imag
+        STATE['decoder_in'] = out
+        STATE['decoder_out'] = out
+        out = out.flatten()
+        return out.real.detach().cpu().contiguous().numpy().tolist(), out.imag.detach().cpu().contiguous().numpy().tolist()
+
+
 STATE['run_model'] = True
 def validate_encoder(real, imag, f_low, f_high, subcarrier_spacing):
     real = torch.tensor(real, dtype=torch.float32, device=device)
@@ -386,11 +438,14 @@ def test_channel_ici_TX(real, imag, f_low, f_high, subcarrier_spacing):
     except Exception as e:
         print("Too many cycles!")
     # Set to energy 1 
-    out = torch.zeros(STATE['Nt'], STATE['Nf'], device=device, dtype=torch.complex64)
-    out[:, curr_carrierIdx] = 1.0 + 0j
-    # out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
+    # out = torch.zeros(STATE['Nt'], STATE['Nf'], device=device, dtype=torch.complex64)
+    # out[:, curr_carrierIdx] = 1.0 + 0j
+
+    real_part = torch.randn(STATE['Nt'], STATE['Nf'])
+    imag_part = torch.randn(STATE['Nt'], STATE['Nf'])
+    out = real_part + 1j * imag_part
+    out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
     STATE['last_sent_channel'] = out
-    print(out)
     # Attach back the zeros.
     k_min = int(np.floor(f_low / subcarrier_spacing))
     zeros = torch.zeros((out.shape[0], k_min), dtype=out.dtype, device=out.device)
@@ -398,17 +453,17 @@ def test_channel_ici_TX(real, imag, f_low, f_high, subcarrier_spacing):
     return out_full.real.detach().cpu().numpy().tolist(), out_full.imag.detach().cpu().numpy().tolist()
 
 def plot_histograms(energy_np, log_energy_np):
-    fig, axs = plt.subplots(1, 2, figsize=(10, 3), dpi=100)
+    fig, axs = plt.subplots(1, 1, figsize=(20, 6))
 
-    axs[0].bar(np.arange(len(energy_np)), energy_np, color="steelblue")
-    axs[0].set_title("Linear Energy per Carrier")
-    axs[0].set_xlabel("Subcarrier Index")
-    axs[0].set_ylabel("Energy")
+    # axs[0].bar(np.arange(len(energy_np)), energy_np, color="steelblue")
+    # axs[0].set_title("Linear Energy per Carrier")
+    # axs[0].set_xlabel("Subcarrier Index")
+    # axs[0].set_ylabel("Energy")
 
-    axs[1].bar(np.arange(len(log_energy_np)), log_energy_np, color="darkorange")
-    axs[1].set_title("Log10 Energy per Carrier")
-    axs[1].set_xlabel("Subcarrier Index")
-    axs[1].set_ylabel("log10(Energy)")
+    axs.bar(np.arange(len(log_energy_np)), log_energy_np, color="darkorange")
+    axs.set_title("Log10 Energy per Carrier")
+    axs.set_xlabel("Subcarrier Index")
+    axs.set_ylabel("log10(Energy)")
 
     fig.tight_layout()
     return fig
@@ -418,7 +473,7 @@ def test_channel_ici_RY(real, imag):
     imag = torch.tensor(imag, dtype=torch.float32, device=device).reshape(STATE['Nt'], STATE['Nf'])
     out = real + 1j * imag
     energy_per_carrier = torch.mean(torch.square(out.abs()), dim=0)
-    log_energy_per_carrier = torch.log10(energy_per_carrier + 1e-20)
+    log_energy_per_carrier = torch.log10(energy_per_carrier)
     # Determine if energy leaked into other carriers
     curr_carrier_idx = STATE['test_carrier_indices'][STATE['carrier_counter']]
     curr_carrier = out[:, curr_carrier_idx].clone()
@@ -625,7 +680,7 @@ def run_encoder(real, imag, f_low, f_high, subcarrier_spacing):
 
     # print("Shapes", x.shape, freqs.shape)
     STATE['encoder_in'] = x[:, k_min:]
-    if STATE['cycle_count'] < 600 and True:
+    if STATE['cycle_count'] < 600 and False:
         out =  x[:, k_min:] # Optionally output identity for stability
     else:
         out = STATE['encoder'](STATE['encoder_in'], freqs)
@@ -646,11 +701,16 @@ def differentiable_channel(encoder_out: torch.tensor, received_symbols: torch.te
     # The following code can allow for an estimate of SNR vs freq.
     X_list = STATE['sent_symbols']
     Y_list = STATE['received_symbols']
+    
+
+    X_list = [x if isinstance(x, torch.Tensor) else torch.tensor(x) for x in X_list]
+    Y_list = [y if isinstance(y, torch.Tensor) else torch.tensor(y) for y in Y_list]
+
 
     assert len(X_list) == len(Y_list)
 
-    X = torch.cat(X_list, dim=0).to(torch.complex64)
-    Y = torch.cat(Y_list, dim=0).to(torch.complex64)
+    X = torch.cat(X_list, dim=0).to(torch.complex64).to(device)
+    Y = torch.cat(Y_list, dim=0).to(torch.complex64).to(device)
     X = X.detach()
     Y = Y.detach()
     gram_matrix = X.t() @ X # [Nf, Nf]
@@ -903,7 +963,7 @@ def get_attention_map(model, x: torch.Tensor, freqs: torch.Tensor):
     # Forward through embedding layers
     with torch.no_grad():
         symbol_embed = model.symbol_embed(x)
-        freq_embed = model.frequency_embed(symbol_embed, freqs)
+        freq_embed = model.freq_embed(symbol_embed, freqs)
 
         # Use the first encoder layer only
         attn_layer = model.transformer.layers[0]  # type: nn.TransformerEncoderLayer

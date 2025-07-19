@@ -19,3 +19,7 @@ scheduler_type: reduce_lr_on_plateu
 weight_init: default
 freq_embed_type: sinusoidal
 normalize_freq: true
+matrix_regularization: 0.0001
+channel_derivative_type: ici_matrix
+ici_window_length: 1000
+plot_frequency: 10
