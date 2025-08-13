@@ -26,7 +26,7 @@ STATE['train_channel'] = True # Variable
 load_model = False # Variable
 LOAD_DIR = ""
 if load_model:
-    model_name = "lemon-capybara-1905" # Variable
+    model_name = "azure-universe-2165" # Variable
     base_dir = r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\models\pickled_models"
     LOAD_DIR = os.path.join(base_dir, model_name) 
     with open(os.path.join(LOAD_DIR, "config.json"), "r") as f:
@@ -302,16 +302,14 @@ def validate_ici_matrix_TX(real, imag, f_low, f_high, subcarrier_spacing):
     imag = torch.tensor(imag, dtype=torch.float32, device=device)
     freqs = torch.arange(0, f_high, subcarrier_spacing, dtype=torch.float32, device=device)
     freqs = freqs.unsqueeze(0).repeat(STATE['Nt'], 1)
-    k_min = int(np.floor(f_low / subcarrier_spacing))
-    freqs = freqs[:, k_min:]
+    num_zeros = STATE['num_zeros']
+    freqs = freqs[:, num_zeros + 1:]
     STATE['frequencies'] = freqs[0, :].detach()
     # No model
     out = real + 1j * imag
-    
-    out = out[:, k_min:]
 
-    STATE['encoder_in'] = out
-    STATE['encoder_out'] = out
+    STATE['encoder_in'] = out[:, num_zeros:]
+    STATE['encoder_out'] = out[:, num_zeros:]
     return  out.real.detach().cpu().numpy().tolist(), out.imag.detach().cpu().numpy().tolist()
 
 
@@ -325,7 +323,7 @@ def validate_ici_matrix_RY(real, imag):
         STATE['decoder_in'] = out
         
         # Load in ICI matrix
-        H_ici = torch.tensor(np.load(r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\saved_models\ici_matrix.npy"), device=device)
+        H_ici = torch.tensor(np.load(r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\saved_models\ici_matrix_2.636V_0.125A.npy"), device=device)
 
         H_ici_inv = torch.linalg.inv(H_ici)
         print("Average Power Before Matrix", out.abs().square().mean(dim=1))
@@ -350,28 +348,28 @@ STATE['run_model'] = True
 def validate_encoder(real, imag, f_low, f_high, subcarrier_spacing):
     real = torch.tensor(real, dtype=torch.float32, device=device)
     imag = torch.tensor(imag, dtype=torch.float32, device=device)
-    k_min = int(np.floor(f_low / subcarrier_spacing))
+    num_zeros = STATE['num_zeros']
     if STATE['run_model']:
         freqs = torch.arange(0, f_high, subcarrier_spacing, dtype=torch.float32, device=device)
         freqs = freqs.unsqueeze(0).repeat(STATE['Nt'], 1)
 
-        freqs = freqs[:, k_min:]
+        freqs = freqs[:, num_zeros + 1:]
         x = real + 1j * imag
 
-        STATE['encoder_in'] = x[:, k_min:]
+        STATE['encoder_in'] = x[:, num_zeros:]
         out = STATE['encoder'](STATE['encoder_in'], freqs)
         out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12) # Unit average power
         STATE['encoder_out'] = out
         STATE['frequencies'] = freqs[0, :].detach()
 
         # Attach back the zeros.
-        zeros = torch.zeros((out.shape[0], k_min), dtype=out.dtype, device=out.device)
+        zeros = torch.zeros((out.shape[0], num_zeros), dtype=out.dtype, device=out.device)
         out_full = torch.cat([zeros, out], dim=1)
         return out_full.real.detach().cpu().numpy().tolist(), out_full.imag.detach().cpu().numpy().tolist()
     else:
         # No model
         out = real + 1j * imag
-        STATE['encoder_in'] = out[:, k_min:]
+        STATE['encoder_in'] = out[:, num_zeros:]
         return  out.real.detach().cpu().numpy().tolist(), out.imag.detach().cpu().numpy().tolist()
 
 def validate_decoder(real, imag):
@@ -396,8 +394,8 @@ def validate_decoder(real, imag):
         out = out.flatten()
         return out.real.detach().cpu().contiguous().numpy().tolist(), out.imag.detach().cpu().contiguous().numpy().tolist()
 
-NOISY_SAMPLE_SIZE = 32 #Arbitrary
-def symbols_for_noise():
+NOISY_SAMPLE_SIZE = 1 #Arbitrary
+def symbols_for_noise(two_carrier=True):
     if "distinct_symbol" not in NOISY_STATE:
         NOISY_STATE["distinct_symbol"] = 0
         NOISY_STATE["symbol_iteration"] = 0
@@ -419,12 +417,11 @@ def symbols_for_noise():
     Nf = STATE['Nf']
 
     # Symbol range -4,4
-    a = -4
-    b = 4
-    real_part = (b-a)*torch.rand(Nt, Nf)+a
-    imag_part = (b-a)*torch.rand(Nt, Nf)+a
-    out = real_part + 1j * imag_part
-    out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12) #Normalize and ensure numerical stability    
+    out = torch.zeros((370), dtype=torch.complex64).unsqueeze(0)
+    out[:, NOISY_STATE["distinct_symbol"] % 370] = 1
+
+    if two_carrier:
+        out[:, (NOISY_STATE["distinct_symbol"] // 370) % 370] = 1
     NOISY_STATE["prior_symbol"] = out
     return out
 
@@ -438,17 +435,17 @@ def test_channel_ici_TX(real, imag, f_low, f_high, subcarrier_spacing):
     except Exception as e:
         print("Too many cycles!")
     # Set to energy 1 
-    # out = torch.zeros(STATE['Nt'], STATE['Nf'], device=device, dtype=torch.complex64)
-    # out[:, curr_carrierIdx] = 1.0 + 0j
+    out = torch.zeros(STATE['Nt'], STATE['Nf'], device=device, dtype=torch.complex64)
+    out[:, curr_carrierIdx] = 1.0 + 0j
 
-    real_part = torch.randn(STATE['Nt'], STATE['Nf'])
-    imag_part = torch.randn(STATE['Nt'], STATE['Nf'])
-    out = real_part + 1j * imag_part
+    # real_part = torch.randn(STATE['Nt'], STATE['Nf'])
+    # imag_part = torch.randn(STATE['Nt'], STATE['Nf'])
+    # out = real_part + 1j * imag_part
     out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
     STATE['last_sent_channel'] = out
     # Attach back the zeros.
-    k_min = int(np.floor(f_low / subcarrier_spacing))
-    zeros = torch.zeros((out.shape[0], k_min), dtype=out.dtype, device=out.device)
+    num_zeros = STATE['num_zeros']
+    zeros = torch.zeros((out.shape[0], num_zeros), dtype=out.dtype, device=out.device)
     out_full = torch.cat([zeros, out], dim=1)
     return out_full.real.detach().cpu().numpy().tolist(), out_full.imag.detach().cpu().numpy().tolist()
 
@@ -513,10 +510,10 @@ def solve_channel_noise_TX(real, imag, f_low, f_high, subcarrier_spacing):
 
     # Update freqs to match shape [Nt, Nf]
     freqs = freqs.unsqueeze(0).repeat(STATE['Nt'], 1)
-    k_min = int(np.floor(f_low / subcarrier_spacing))
-    freqs = freqs[:, k_min:]
+    num_zeros = STATE['num_zeros']
+    freqs = freqs[:, num_zeros + 1:]
     # out = real + 1j * imag
-    # out = out[:, k_min:]
+    # out = out[:, num_zeros:]
     STATE['encoder_in'] = out
 
     # Save prediction for loss calculation
@@ -525,7 +522,7 @@ def solve_channel_noise_TX(real, imag, f_low, f_high, subcarrier_spacing):
     STATE['frequencies'] = freqs[0, :].detach()
 
     # Attach back the zeros.
-    zeros = torch.zeros((out.shape[0], k_min), dtype=out.dtype, device=out.device)
+    zeros = torch.zeros((out.shape[0], num_zeros), dtype=out.dtype, device=out.device)
     out_full = torch.cat([zeros, out], dim=1)
     return out_full.real.detach().cpu().numpy().tolist(), out_full.imag.detach().cpu().numpy().tolist()
 
@@ -537,7 +534,9 @@ def solve_channel_noise_RY(real, imag):
     # Update local dataset
     # append_to_npz(r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_inputs_outputs.npz", STATE["last_sent_channel"], out)
 
-    append_symbol_frame(STATE['last_sent_channel'], out, STATE['frequencies'],noise_sample_indexing=True)
+    append_symbol_frame(STATE['last_sent_channel'], out, STATE['frequencies'],noise_sample_indexing=True,
+                        h5_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\two_carrier_data.h5")
+    print(f"Appended new symbol, distinct symbol #{NOISY_STATE['distinct_symbol']}")
     STATE['decoder_out'] = out
     out = out.flatten()
     return out.real.detach().cpu().contiguous().numpy().tolist(), out.imag.detach().cpu().contiguous().numpy().tolist()
@@ -557,8 +556,8 @@ def train_channel_model_TX(real, imag, f_low, f_high, subcarrier_spacing):
 
     # Update freqs to match shape [Nt, Nf]
     freqs = freqs.unsqueeze(0).repeat(STATE['Nt'], 1)
-    k_min = int(np.floor(f_low / subcarrier_spacing))
-    freqs = freqs[:, k_min:]
+    num_zeros = STATE['num_zeros']
+    freqs = freqs[:, num_zeros + 1:]
     STATE['encoder_in'] = out
 
     # Save prediction for loss calculation
@@ -567,7 +566,7 @@ def train_channel_model_TX(real, imag, f_low, f_high, subcarrier_spacing):
     STATE['last_sent_channel'] = out
     STATE['frequencies'] = freqs[0, :].detach()
     # Attach back the zeros.
-    zeros = torch.zeros((out.shape[0], k_min), dtype=out.dtype, device=out.device)
+    zeros = torch.zeros((out.shape[0], num_zeros), dtype=out.dtype, device=out.device)
     out_full = torch.cat([zeros, out], dim=1)
     return out_full.real.detach().cpu().numpy().tolist(), out_full.imag.detach().cpu().numpy().tolist()
 
@@ -581,7 +580,8 @@ def train_channel_model_RY(real, imag):
     # Calculate loss
     predicted_symbols = STATE['channel_prediction']
     loss = evm_loss_func(predicted_symbols, out)
-    append_symbol_frame(STATE['last_sent_channel'], out, STATE['frequencies'])
+    append_symbol_frame(STATE['last_sent_channel'], out, STATE['frequencies'], 
+                        h5_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\fixed_ici_clipped_channel_measurements_2.636V_0.125A.h5")
     STATE['cycle_count'] += 1
     if loss is not None:
         STATE['loss_accumulator'].append(loss)
@@ -674,14 +674,14 @@ def run_encoder(real, imag, f_low, f_high, subcarrier_spacing):
 
     # Update freqs to match shape [Nt, Nf]
     freqs = freqs.unsqueeze(0).repeat(STATE['Nt'], 1)
-    k_min = int(np.floor(f_low / subcarrier_spacing))
-    freqs = freqs[:, k_min:]
+    num_zeros = STATE['num_zeros']
+    freqs = freqs[:, num_zeros + 1:]
     x = real + 1j * imag
 
     # print("Shapes", x.shape, freqs.shape)
-    STATE['encoder_in'] = x[:, k_min:]
+    STATE['encoder_in'] = x[:, num_zeros:]
     if STATE['cycle_count'] < 600 and False:
-        out =  x[:, k_min:] # Optionally output identity for stability
+        out =  x[:, num_zeros:] # Optionally output identity for stability
     else:
         out = STATE['encoder'](STATE['encoder_in'], freqs)
         out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12) # Unit average power
@@ -691,7 +691,7 @@ def run_encoder(real, imag, f_low, f_high, subcarrier_spacing):
     STATE['ML_time'] += (time.time() - start_time)
 
     # Attach back the zeros.
-    zeros = torch.zeros((out.shape[0], k_min), dtype=out.dtype, device=out.device)
+    zeros = torch.zeros((out.shape[0], num_zeros), dtype=out.dtype, device=out.device)
     out_full = torch.cat([zeros, out], dim=1)
 
     return out_full.real.detach().cpu().numpy().tolist(), out_full.imag.detach().cpu().numpy().tolist()
@@ -1432,7 +1432,7 @@ def plot_received_vs_predicted(received_symbols: torch.Tensor,
 
 def append_symbol_frame(
     sent, received, freqs,
-    h5_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\ici_channel_measurements.h5",
+    h5_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\singleton_data.h5",
     metadata: dict = None,
     noise_sample_indexing = False
 ):

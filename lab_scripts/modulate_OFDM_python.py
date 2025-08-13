@@ -64,9 +64,12 @@ def modulate_data_OFDM(mode: str,
     # Account for frequency scaling with the AWG. Namely, if Nt symbols are sent successively,
     # each OFDM symbol's carriers are scaled by Nt. This can be acomplished by driving each frame at subcarrier_delta_f / Nt
 
-    k_min = int(np.floor(f_min / subcarrier_delta_f))
+    num_zeros = int(np.floor(f_min / subcarrier_delta_f)) - 1
+    STATE['num_zeros'] = num_zeros
 
-    N_data = int(np.floor(f_max / subcarrier_delta_f) - k_min)
+    N_data = int(np.floor(f_max / subcarrier_delta_f) - num_zeros) - 1
+
+    STATE['N_data'] = N_data
 
     STATE['Nt'] = num_symbols_per_frame
     STATE['Nf'] = N_data
@@ -95,8 +98,8 @@ def modulate_data_OFDM(mode: str,
 
     encoded_symbol_frame = encoded_symbols.reshape(num_symbols_per_frame, N_data) # [Nt, Nf]
 
-    # Add zeros on front equal to k_min 
-    encoded_symbol_frame = np.hstack((np.zeros((encoded_symbol_frame.shape[0], k_min)), encoded_symbol_frame))
+    # Add zeros on front equal to num_zeros 
+    encoded_symbol_frame = np.hstack((np.zeros((encoded_symbol_frame.shape[0], num_zeros)), encoded_symbol_frame))
     encoded_symbol_frame_real = encoded_symbol_frame.real.copy()
     encoded_symbol_frame_imag = encoded_symbol_frame.imag.copy()
 
@@ -111,12 +114,12 @@ def modulate_data_OFDM(mode: str,
     return encoded_symbol_frame_real, encoded_symbol_frame_imag, grouped_true_bits_list, int(N_data)
 
 
-AWG_MEMORY_LENGTH = 16384
+AWG_MEMORY_LENGTH = 16384 // 2
 # AWG_MEMORY_LENGTH = 105
 # AWG_MEMORY_LENGTH = 65536
 
-
-BARKER_LENGTH = int(0.01 * (AWG_MEMORY_LENGTH)) if int(0.01 * (AWG_MEMORY_LENGTH)) > 5 else 5
+BARKER_RATIO = 0.01
+BARKER_LENGTH = int(BARKER_RATIO * (AWG_MEMORY_LENGTH)) if int(BARKER_RATIO * (AWG_MEMORY_LENGTH)) > 5 else 5
 CP_RATIO = 0.25
 def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: list[list[float]], cyclic_prefix_length: int) -> list[float]:
     '''Takes a symbol frame matrix and converts and x(t) frame matrix
@@ -130,12 +133,13 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
 
     '''
     symbol_groups = np.array(real_symbol_groups) + np.array(imag_symbol_groups) * 1j
-    STATE['sent_symbols'].append(torch.tensor(symbol_groups[:, -STATE['Nf']:]))
+    STATE['last_sent'] = torch.tensor(symbol_groups[:, -STATE['Nf']:])
+    STATE['sent_symbols'].append(STATE['last_sent'])
     N_t = symbol_groups.shape[0]
     barker_code = np.array([1, 1, 1, 1, 1,-1, -1, 1, 1, -1, 1, -1, 1], dtype=float)
     barker_code = np.repeat(barker_code, BARKER_LENGTH // len(barker_code)) # Set as 1%
 
-    SYMBOL_LENGTH = (AWG_MEMORY_LENGTH - len(barker_code)) / N_t
+    SYMBOL_LENGTH = (AWG_MEMORY_LENGTH - len(barker_code)) // N_t
     IFFT_LENGTH = int(SYMBOL_LENGTH * (1 - CP_RATIO))
     IFFT_LENGTH -= IFFT_LENGTH % 2 # Force to be even
     '''CP'''
@@ -156,7 +160,7 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
     assert full_symbols.shape[1] == IFFT_LENGTH, "Symbol length mismatch after padding and symmetry."
 
     cyclic_prefix_length = int(SYMBOL_LENGTH * CP_RATIO)
-    x_t_no_cp = np.real(np.fft.ifft(full_symbols, axis=1))
+    x_t_no_cp = np.real(np.fft.ifft(full_symbols, axis=1, norm='ortho'))
 
     # Add cyclic prefix per symbol
     x_t_groups = []
@@ -169,8 +173,6 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
   
     # Flatten to create frame in time domain
     x_t_frame = x_t_groups.flatten()
-    max_abs_val = np.max(np.abs(x_t_frame)) + 1e-12  # avoid div-by-zero
-    x_t_frame /= max_abs_val
     x_t_with_barker = np.concatenate([barker_code, x_t_frame])
     x_t_with_barker = np.ascontiguousarray(x_t_with_barker).astype(float)
     x_t_with_barker = x_t_with_barker[:AWG_MEMORY_LENGTH]  # truncate if needed
@@ -194,12 +196,12 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
                                      Nt: int) -> list:
     '''Converts received y(t) into symbols with optional debugging plots'''
 
-    debug_plots = False
+    debug_plots = True
     PLOT_SNR = False
 
-    k_min = int(np.floor(f_min / subcarrier_delta_f))
+    num_zeros = STATE['num_zeros']
 
-    N_data = int(np.floor(f_max / subcarrier_delta_f) - k_min)
+    N_data = STATE['N_data']
 
     constellation = get_constellation(mode)
 
@@ -289,7 +291,7 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
         # symbol /= np.max(np.abs(symbol)) + 1e-12
         symbols.append(symbol)
 
-    Y_s_matrix = np.array([np.fft.fft(s) for s in symbols])
+    Y_s_matrix = np.array([np.fft.fft(s, norm="ortho") for s in symbols])
     if debug_plots:
         plt.subplot(325)
         limited_magnitude = np.abs(Y_s_matrix[0])
@@ -301,26 +303,15 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
         plt.ylabel('Magnitude')
 
     # # Extract both positive and negative frequency carriers
-    num_data_carriers = N_data
-
-    data_subcarriers_all = []
+    data_subcarriers = []
 
     for symbol_fft in Y_s_matrix:
-        negative_carriers = symbol_fft[k_min + 1:N_data + k_min + 1] # Account for DC = 0 being added
-        # Optionally include positive_carriers if your OFDM symbol is Hermitian symmetric
-        # positive_carriers = symbol_fft[-num_data_carriers - k_min - 1: -k_min - 1]
+        positive_carriers = symbol_fft[num_zeros + 1:N_data + num_zeros + 1] # Account for DC = 0 being added
+        data_subcarriers.append(positive_carriers)  
 
-        data_subcarriers_all.append(negative_carriers)  
-
-    normalized_data_subcarriers = []
-
-    for carriers in data_subcarriers_all:
-        scale = np.sqrt(np.mean(np.abs(constellation._complex_symbols)**2)) / np.sqrt(np.mean(np.abs(carriers)**2) + 1e-12)
-        normalized_carriers = carriers * scale
-        normalized_data_subcarriers.append(normalized_carriers)
-
-    STATE['received_symbols'].append(normalized_data_subcarriers)
-    data_subcarriers = np.concatenate(normalized_data_subcarriers)
+    STATE['last_received'] = torch.tensor(data_subcarriers)
+    STATE['received_symbols'].append(data_subcarriers)
+    data_subcarriers = np.concatenate(data_subcarriers)
 
     '-----------------------------Channel Estimation ---------------------------------------------------------'
     X_k = np.array(STATE['sent_symbols'][-1])[0]
@@ -334,8 +325,8 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
         # Plot 6: Constellation Diagram
 
         # Calculate frequencies
-        frequencies_per_symbol = np.arange(f_min+ subcarrier_delta_f, 
-                                f_min + subcarrier_delta_f * num_data_carriers + subcarrier_delta_f, 
+        frequencies_per_symbol = np.arange(f_min + subcarrier_delta_f, 
+                                f_min + subcarrier_delta_f * N_data + subcarrier_delta_f, 
                                 subcarrier_delta_f)
         frequencies = np.tile(frequencies_per_symbol, Nt)
         normalized_frequencies = (frequencies - np.min(frequencies)) / (np.max(frequencies) - np.min(frequencies))
@@ -357,7 +348,6 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
         plt.tight_layout()
         plt.show()
         plt.close()
-
 
     if debug_plots:
         # Compute magnitude and phase
@@ -499,9 +489,11 @@ def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,
     else:
         cancel_run_early = False
 
-    SNR, PowerFactor = float(0), float(0) 
+    SNR, PowerFactor = float(0), float(0)
+
+    evm = torch.mean(torch.square(torch.abs(STATE['last_sent'] - STATE['last_received'])))
     
-    return decided_bits_flat, float(BER), SNR, PowerFactor, cancel_run_early
+    return decided_bits_flat, float(BER), evm, PowerFactor, cancel_run_early
 
 
 def make_validate_plots(encoder_in, decoder_out, frame_BER, run_model, freqs=None):
