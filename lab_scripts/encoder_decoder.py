@@ -40,7 +40,7 @@ LOAD_DIR = ""
 if load_model:
     model_name = "azure-universe-2165" # Variable
     base_dir = r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\models\pickled_models"
-    LOAD_DIR = os.path.join(base_dir, model_name) 
+    LOAD_DIR = os.path.join(base_dir, model_name)
     with open(os.path.join(LOAD_DIR, "config.json"), "r") as f:
         hyperparams = json.load(f)
 
@@ -103,6 +103,9 @@ class FrequencyPositionalEmbedding(nn.Module):
         '''
 
         Nt, Nf, _ = x.shape
+
+        if freq.dim() == 1:  # [Nf]
+            freq = freq.unsqueeze(0).expand(Nt, -1)
 
         if self.normalize:
             freq = 2 * (freq - freq.min()) / (freq.max() - freq.min()) - 1 # [-1, 1]
@@ -352,7 +355,7 @@ def validate_ici_matrix_RY(real, imag):
         imag = torch.tensor(imag, dtype=torch.float32, device=device).reshape(Nt, Nf)
         out = real + 1j * imag
         STATE['decoder_in'] = out
-        
+
         # Load in ICI matrix
         H_ici = torch.tensor(np.load(r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\saved_models\ici_matrix_2.636V_0.125A.npy"), device=device)
 
@@ -443,7 +446,7 @@ def symbols_for_noise(num_freqs:int, two_carrier=True):
 
     if not make_new:
         return NOISY_STATE["prior_symbol"]
-    
+
     Nt = STATE['Nt']
     Nf = STATE['Nf']
 
@@ -522,7 +525,7 @@ def test_channel_ici_RY(real, imag):
     out[:, curr_carrier_idx] = 0
     total_energy = torch.mean(torch.square(out.abs()), dim=1).item()
     relative_ICI = total_energy / energy_at_carrier
-  
+
 
     # Convert to NumPy
     energy_np = energy_per_carrier.detach().cpu().numpy()
@@ -762,7 +765,7 @@ def differentiable_channel(encoder_out: torch.tensor, received_symbols: torch.te
     # The following code can allow for an estimate of SNR vs freq.
     X_list = STATE['sent_symbols']
     Y_list = STATE['received_symbols']
-    
+
 
     X_list = [x if isinstance(x, torch.Tensor) else torch.tensor(x) for x in X_list]
     Y_list = [y if isinstance(y, torch.Tensor) else torch.tensor(y) for y in Y_list]
