@@ -16,11 +16,14 @@ from training_state import STATE
 import torch
 import matplotlib.cm as cm
 import matplotlib.colors as colors
+from scipy.fft import irfft, rfft
+from fractions import Fraction
+from scipy.signal import hilbert
 
 # Get logging
 from lab_scripts.logging_code import *
-
-# decode_logger = setup_logger(log_file=r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\decode_bits_log.txt")
+STATE['verify_synchronization'] = False
+decode_logger = setup_logger(log_file=r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\test.txt")
 STATE['sent_symbols'] = []
 STATE['received_symbols'] = []
 STATE['channel_estimates'] = []
@@ -100,6 +103,7 @@ def modulate_data_OFDM(mode: str,
 
     # Add zeros on front equal to num_zeros 
     encoded_symbol_frame = np.hstack((np.zeros((encoded_symbol_frame.shape[0], num_zeros)), encoded_symbol_frame))
+    # decode_logger.debug(f"Modulate Data Outshape {encoded_symbol_frame.shape}")
     encoded_symbol_frame_real = encoded_symbol_frame.real.copy()
     encoded_symbol_frame_imag = encoded_symbol_frame.imag.copy()
 
@@ -133,15 +137,21 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
 
     '''
     symbol_groups = np.array(real_symbol_groups) + np.array(imag_symbol_groups) * 1j
-    STATE['last_sent'] = torch.tensor(symbol_groups[:, -STATE['Nf']:])
+    # decode_logger.debug(f"Symbol Groups shape {symbol_groups.shape}")
+    data_lo = STATE['num_zeros']       # index inside symbol_groups (no DC bin in this array)
+    data_hi = data_lo + STATE['Nf']
+    STATE['last_sent'] = torch.tensor(symbol_groups[:, data_lo:data_hi])
     STATE['sent_symbols'].append(STATE['last_sent'])
     N_t = symbol_groups.shape[0]
-    barker_code = np.array([1, 1, 1, 1, 1,-1, -1, 1, 1, -1, 1, -1, 1], dtype=float)
+    # barker_code = np.array([1, 1, 1, 1, 1,-1, -1, 1, 1, -1, 1, -1, 1], dtype=float)
+    barker_code = np.array([1, -1, 1, -1, 1,-1, 1, -1, 1], dtype=float)
     barker_code = np.repeat(barker_code, BARKER_LENGTH // len(barker_code)) # Set as 1%
+  
 
     SYMBOL_LENGTH = (AWG_MEMORY_LENGTH - len(barker_code)) // N_t
     IFFT_LENGTH = int(SYMBOL_LENGTH * (1 - CP_RATIO))
     IFFT_LENGTH -= IFFT_LENGTH % 2 # Force to be even
+    STATE['IFFT_LENGTH'] = IFFT_LENGTH
     '''CP'''
 
 
@@ -151,16 +161,20 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
     padding_zeros = np.zeros(shape=(symbol_groups.shape[0], number_of_zeros))
     symbol_groups = np.hstack((symbol_groups, padding_zeros))
 
-    # Add DC offset, Nyquist carrier, and conjugate symmetry
-    symbol_groups_conjugate_flipped = np.conj(symbol_groups)[:, ::-1] # Flip along axis=1
+    # # Add DC offset, Nyquist carrier, and conjugate symmetry
+    # symbol_groups_conjugate_flipped = np.conj(symbol_groups)[:, ::-1] # Flip along axis=1
 
-    DC_nyquist = np.zeros(shape=(symbol_groups.shape[0], 1)) # Both are set to 0
-    full_symbols = np.hstack((DC_nyquist, symbol_groups, DC_nyquist, symbol_groups_conjugate_flipped)) # [Nt, Nf]
-    
-    assert full_symbols.shape[1] == IFFT_LENGTH, "Symbol length mismatch after padding and symmetry."
+    DC_nyquist = np.zeros(shape=(symbol_groups.shape[0], 1), dtype=np.complex64) # Both are set to 0
+    # full_symbols = np.hstack((DC_nyquist, symbol_groups, DC_nyquist, symbol_groups_conjugate_flipped)) # [Nt, Nf]
+    half_spectrum = np.hstack((DC_nyquist, symbol_groups, DC_nyquist))
+    assert half_spectrum.shape[1] == (IFFT_LENGTH // 2 + 1), "Half-spectrum length mismatch."
+
 
     cyclic_prefix_length = int(SYMBOL_LENGTH * CP_RATIO)
-    x_t_no_cp = np.real(np.fft.ifft(full_symbols, axis=1, norm='ortho'))
+    x_t_no_cp = irfft(half_spectrum, n=IFFT_LENGTH, axis=1, norm='ortho', workers=os.cpu_count()).astype(np.float32, copy=False)
+
+    # x_t_no_cp = np.real(np.fft.ifft(full_symbols, axis=1, norm='ortho'))
+
 
     # Add cyclic prefix per symbol
     x_t_groups = []
@@ -176,12 +190,54 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
     x_t_with_barker = np.concatenate([barker_code, x_t_frame])
     x_t_with_barker = np.ascontiguousarray(x_t_with_barker).astype(float)
     x_t_with_barker = x_t_with_barker[:AWG_MEMORY_LENGTH]  # truncate if needed
-    x_t_with_barker = np.clip(x_t_with_barker, -1.0, 1.0)
+    # x_t_with_barker = np.clip(x_t_with_barker, -0.1, 5)
+    # x_t_with_barker = np.clip(x_t_with_barker, -1.0, 1.0)
     return x_t_with_barker.reshape(1, -1).tolist(), barker_code
 
+def find_start(peak, voltages, preamble_length, ofdm_payload_length, search_window=20):
+    '''Based on rough estimates of peaks, use the cyclic prefix to find a better start to the frame'''
+    num_symbols = STATE['Nt']
+    curr_start = peak + preamble_length
+    symbol_length = (ofdm_payload_length // num_symbols)
+    cp_length = int(CP_RATIO * symbol_length)
+    N_fft = symbol_length - cp_length
+    best_start = curr_start
+    best_corr = 0
+
+    STATE['offs'], STATE['corrs'], STATE['phis'] = [], [], []
+    for offset in range(-search_window, search_window + 1):
+        # Test correlation of cyclic prefix and tail
+        start = curr_start + offset
+        end = start + symbol_length
+        if start < 0 or end > len(voltages):
+            continue # try different offset
+        symbol = voltages[start: end]
+        analytic_symbol = hilbert(symbol)
+        cyclic_prefix_j = analytic_symbol[:cp_length]
+        tail_j = analytic_symbol[-cp_length: ]
+        corr = np.vdot(cyclic_prefix_j, tail_j) / (np.linalg.norm(cyclic_prefix_j) * np.linalg.norm(tail_j))
+        STATE['offs'].append(offset)
+        STATE['corrs'].append(np.abs(corr))
+        STATE['phis'].append(np.angle(corr))
+        if np.abs(corr) > best_corr:
+            best_corr = np.abs(corr)
+            best_start = curr_start + offset
+            best_phi = np.angle(corr)
+            omega_hat = best_phi / float(N_fft)
+            epsilon_hat = best_phi / (2 * np.pi)
+    if STATE['verify_synchronization']:
+        # Plot correlation vs various offsets
+        offs = np.array(STATE['offs'])
+        corrs = np.array(STATE['corrs'])
+        plt.plot(offs, corrs)
+        plt.xlabel("Offset")
+        plt.ylabel("Correlation")
+        plt.show()
+
+    return best_start, best_start - preamble_length, omega_hat, epsilon_hat
 
 
-
+STATE['peaks'] = []
 def demodulate_OFDM_one_symbol_frame(y_t:list,
                                      num_carriers: int,
                                      CP_length: int,
@@ -196,7 +252,7 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
                                      Nt: int) -> list:
     '''Converts received y(t) into symbols with optional debugging plots'''
 
-    debug_plots = True
+    debug_plots = False
     PLOT_SNR = False
 
     num_zeros = STATE['num_zeros']
@@ -227,6 +283,9 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
     # Correlation and peak detection
     corr = signal.correlate(voltages, preamble_sequence_upsampled, mode='valid')
     peaks, _ = find_peaks(corr, height=0.99*np.max(corr), distance=len(preamble_sequence_upsampled))
+
+    # shift peaks for debugginh
+    # peaks += 5
     if debug_plots:
         plt.subplot(322)
         plt.plot(voltages)
@@ -256,29 +315,45 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
 
     preamble_length = len(preamble_sequence_upsampled)
     ofdm_payload_length = int(num_points_frame - preamble_length)
-    frames = []
 
-    for peak in peaks:
-        frame_start = peak + preamble_length
-        frame_end = frame_start + ofdm_payload_length
-        frame = voltages[frame_start:frame_end]
-        frames.append(frame)
+    peak = peaks[0]
+    # Use correlation of cyclic prefix to find optimal starting point of frame
+    # best_start, best_peak, best_omega, best_eps = find_start(peak, voltages, preamble_length, ofdm_payload_length)
+    best_start = peak + preamble_length
+    # STATE['peaks'].append(best_peak)
+    # if len(peaks) > 1:
+    #     peaksnp = np.array(STATE['peaks'])
+    #     decode_logger.debug(f"Peak Mean: {peaksnp.mean()} | Peaks std: {peaksnp.std()} | Latest Peak {best_peak} | Latest eps {best_eps} ")
+    frame_end = best_start + ofdm_payload_length
+    frame = voltages[best_start:frame_end]
 
-    if debug_plots and len(frames) > 0:
+    if debug_plots:
+        frames = []
+        for peak in peaks:
+            frame_end = best_start + ofdm_payload_length
+            frame = voltages[best_start:frame_end]
+            frames.append(frame)
         plt.subplot(324)
         plt.plot(frames[0])
         plt.title(f'First Extracted Frame Length: {len(frames[0])}')
         plt.xlabel('Sample')
         plt.ylabel('Amplitude')
 
-    if len(frames) == 0:
-        raise ValueError("No valid frames detected")
+        if len(frames) == 0:
+            raise ValueError("No valid frames detected")
 
-    frame_y_t = np.array(frames[0])
+    frame_y_t = np.array(frame)
     frame_len = len(frame_y_t)
     symbol_len = frame_len // Nt
     CP_length = int(symbol_len * CP_RATIO)
     fft_len = symbol_len - CP_length
+
+    # Set fft length based on f_osc / f_low
+    # fft_len = int(osc_sample_rate // subcarrier_delta_f)
+
+
+    # decode_logger.debug(f"CP Length {CP_length}")
+    # decode_logger.debug(f"FFT Length {fft_len}")
 
     # Target sample centers for each symbol
     symbols = []
@@ -288,26 +363,57 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
 
         symbol_with_cp = frame_y_t[start:end]
         symbol = symbol_with_cp[CP_length:][:fft_len]
+        window = 4
+        if STATE['verify_synchronization']:
+            fft_lens = range(fft_len - window, fft_len + window + 1, 2)
+            for N in fft_lens:
+                symbol_i = symbol_with_cp[CP_length:][:N]
+                debug_Y_half = rfft(symbol_i, n=N, norm="ortho", workers=os.cpu_count())
+                mag = 20*np.log10(np.abs(debug_Y_half) / (np.max(np.abs(debug_Y_half))))
+                k_peak = np.argmax(mag)
+                bins = np.arange(len(mag)) - k_peak
+                win = 50  # show ±50 bins around peak
+                k0 = max(0, k_peak - win)
+                k1 = min(len(mag), k_peak + win)
+                plt.plot(bins[k0:k1], mag[k0:k1], alpha=0.6, label=f"N={N}")
+
+            # plot here
+            plt.xlabel("Bin offset from main lobe")
+            plt.ylabel("Magnitude (dB, normalized)")
+            plt.title("Dirichlet sidelobes vs FFT length (aligned)")
+            plt.grid(True, alpha=0.3)
+            plt.legend(ncol=3, fontsize=8)
+            plt.show()
+
+        
+        symbol = symbol.astype(np.complex128)
+        # Account for CFO 
+        # n = np.arange(fft_len, dtype= np.complex128)
+        # symbol *= np.exp(-1j * best_omega * n)
         # symbol /= np.max(np.abs(symbol)) + 1e-12
         symbols.append(symbol)
 
-    Y_s_matrix = np.array([np.fft.fft(s, norm="ortho") for s in symbols])
+    symbols_arr = np.ascontiguousarray(np.stack(symbols).astype(np.float32))  # [Nt, fft_len]
+
+    STATE['last_time_symbol_received'] = signal.decimate(symbols_arr, q=10, ftype='iir', zero_phase=True, axis=-1)
+    Y_half = rfft(symbols_arr, n=fft_len, axis=1, norm="ortho", workers=os.cpu_count())  # [Nt, fft_len//2+1]
+    # Y_half_test = rfft(STATE['last_time_symbol_received'], n=STATE['last_time_symbol_received'].shape[1], axis=1, norm="ortho", workers=os.cpu_count())  # [Nt, fft_len//2+1]
+    # decode_logger.debug(f"True Half {np.argmax(np.abs(Y_half[:, num_zeros+1 : num_zeros+1 + N_data]))}")
+    # decode_logger.debug(f"Test Half {np.argmax(np.abs(Y_half_test[:, num_zeros+1 : num_zeros+1 + N_data]))}")
+    STATE['last_freq_symbol_received'] = Y_half[:, :2 * STATE['Nf'] + num_zeros + 1]
+
+    # Select your data carriers directly from the half-spectrum:
+    # bins: 0=DC, ..., num_zeros, (num_zeros+1 ... num_zeros+N_data)=your band, ..., Nyquist
+    data_subcarriers = Y_half[:, num_zeros+1 : num_zeros+1 + N_data]  # shape [Nt, N_data]
     if debug_plots:
         plt.subplot(325)
-        limited_magnitude = np.abs(Y_s_matrix[0])
+        limited_magnitude = np.log10(np.abs(Y_half[0][1:2 * STATE['Nf']]))
 
         # Plot the FFT magnitude
         plt.plot(limited_magnitude)
         plt.title('FFT Magnitude of 1st symbol')
         plt.xlabel('Frequency (Hz)')
-        plt.ylabel('Magnitude')
-
-    # # Extract both positive and negative frequency carriers
-    data_subcarriers = []
-
-    for symbol_fft in Y_s_matrix:
-        positive_carriers = symbol_fft[num_zeros + 1:N_data + num_zeros + 1] # Account for DC = 0 being added
-        data_subcarriers.append(positive_carriers)  
+        plt.ylabel('Magnitude Log10')
 
     STATE['last_received'] = torch.tensor(data_subcarriers)
     STATE['received_symbols'].append(data_subcarriers)

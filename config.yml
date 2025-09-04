@@ -14,7 +14,7 @@ nhead: 8
 nlayers: 4
 num_symbols_per_frame: 1
 pre_layer_norm: false
-save_model_frequency: 500
+save_model_frequency: 1000000000
 scheduler_type: reduce_lr_on_plateu
 weight_init: default
 freq_embed_type: sinusoidal

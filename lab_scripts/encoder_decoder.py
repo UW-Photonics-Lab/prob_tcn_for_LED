@@ -17,12 +17,24 @@ import time
 import pprint
 from transformers import get_linear_schedule_with_warmup
 import traceback
-
+from lab_scripts.constellation_diagram import QPSK_Constellation
+from lab_scripts.constellation_diagram import RingShapedConstellation
 script_dir = os.path.dirname(os.path.abspath(__file__))
+
+def get_constellation(mode: str):
+        if mode == "qpsk":
+            constellation = QPSK_Constellation()
+        elif mode == "m5_apsk_constellation":
+            constellation = RingShapedConstellation(filename=r'C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\lab_scripts\saved_constellations\m5_apsk_constellation.npy')
+        elif mode == "m6_apsk_constellation":
+            constellation = RingShapedConstellation(filename=r'C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\lab_scripts\saved_constellations\m6_apsk_constellation.npy')
+        elif mode == "m7_apsk_constellation":
+            constellation = RingShapedConstellation(filename=r'C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\lab_scripts\saved_constellations\m7_apsk_constellation.npy')
+        return constellation
 
 STATE['train_model'] = False # Variable
 STATE['validate_model'] = False # Variable
-STATE['train_channel'] = True # Variable
+STATE['train_channel'] = False # Variable
 load_model = False # Variable
 LOAD_DIR = ""
 if load_model:
@@ -296,6 +308,25 @@ def evm_loss_func(true_symbols, predicted_symbols):
 
 
 
+def verify_synchronization_TX(real, imag, f_low, f_high, subcarrier_spacing):
+    STATE['verify_synchronization'] = True
+    Nf, Nt = STATE['Nf'], STATE['Nt']
+    probe = 10
+    # Generate Single Tone
+    X_test = torch.zeros(Nt, Nf, dtype=torch.complex64)
+    X_test[:, probe] = 1
+    X_test = X_test / (torch.mean(X_test.abs().pow(2), dim=1).sqrt())
+    zeros = torch.zeros((X_test.shape[0], STATE['num_zeros']), dtype=X_test.dtype, device=X_test.device)
+    out_full = torch.cat([zeros, X_test], dim=1)
+    return out_full.real.numpy().tolist(), out_full.imag.numpy().tolist()
+
+
+
+def verify_synchronization_Ry():
+    pass
+
+
+
 STATE['run_model'] = True
 def validate_ici_matrix_TX(real, imag, f_low, f_high, subcarrier_spacing):
     real = torch.tensor(real, dtype=torch.float32, device=device)
@@ -395,7 +426,7 @@ def validate_decoder(real, imag):
         return out.real.detach().cpu().contiguous().numpy().tolist(), out.imag.detach().cpu().contiguous().numpy().tolist()
 
 NOISY_SAMPLE_SIZE = 1 #Arbitrary
-def symbols_for_noise(two_carrier=True):
+def symbols_for_noise(num_freqs:int, two_carrier=True):
     if "distinct_symbol" not in NOISY_STATE:
         NOISY_STATE["distinct_symbol"] = 0
         NOISY_STATE["symbol_iteration"] = 0
@@ -416,12 +447,25 @@ def symbols_for_noise(two_carrier=True):
     Nt = STATE['Nt']
     Nf = STATE['Nf']
 
+    jitter_power = 1e-2
+    jitter = np.sqrt(jitter_power/2)*(torch.randn(Nt, Nf) + 1j * torch.randn(Nt, Nf)) 
+      #Grab constellation object
+    constellation = get_constellation(mode="m7_apsk_constellation")
+    bits = torch.randint(0, 2, size=(constellation.modulation_order * Nf * Nt, )).numpy()
+    bit_strings = [str(x) for x in bits]
+    bits = "".join(bit_strings)
+    s_samples = torch.tensor(constellation.bits_to_symbols(bits)).reshape(Nt, Nf)
+    s_samples += jitter
+
+
     # Symbol range -4,4
-    out = torch.zeros((370), dtype=torch.complex64).unsqueeze(0)
-    out[:, NOISY_STATE["distinct_symbol"] % 370] = 1
+    out = torch.zeros((num_freqs), dtype=torch.complex64).unsqueeze(0)
+    out[:, NOISY_STATE["distinct_symbol"] % num_freqs] = s_samples[:, 0]
 
     if two_carrier:
-        out[:, (NOISY_STATE["distinct_symbol"] // 370) % 370] = 1
+        out[:, (NOISY_STATE["distinct_symbol"] // num_freqs) % num_freqs] = s_samples[:, 1]
+
+    out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
     NOISY_STATE["prior_symbol"] = out
     return out
 
@@ -504,7 +548,8 @@ def solve_channel_noise_TX(real, imag, f_low, f_high, subcarrier_spacing):
     # imag = torch.tensor(imag, dtype=torch.float32, device=device)
     Nt = STATE["Nt"]
     Nf = STATE["Nf"]
-    out = symbols_for_noise()
+
+    out = symbols_for_noise(Nf, two_carrier=True)
 
     freqs = torch.tensor(np.arange(0, f_high, subcarrier_spacing), dtype=torch.float32, device=device) # Start at 0 frequency for shape matching
 
@@ -533,9 +578,8 @@ def solve_channel_noise_RY(real, imag):
     STATE['decoder_in'] = out
     # Update local dataset
     # append_to_npz(r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_inputs_outputs.npz", STATE["last_sent_channel"], out)
-
-    append_symbol_frame(STATE['last_sent_channel'], out, STATE['frequencies'],noise_sample_indexing=True,
-                        h5_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\two_carrier_data.h5")
+    append_symbol_frame(STATE['last_sent_channel'], STATE['last_freq_symbol_received'], freqs=STATE['frequencies'],noise_sample_indexing=False, received_time=STATE['last_time_symbol_received'],
+                        h5_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\wideband_3.1V.h5")
     print(f"Appended new symbol, distinct symbol #{NOISY_STATE['distinct_symbol']}")
     STATE['decoder_out'] = out
     out = out.flatten()
@@ -547,10 +591,24 @@ def train_channel_model_TX(real, imag, f_low, f_high, subcarrier_spacing):
     Nt = STATE['Nt']
     Nf = STATE['Nf']
 
+
+    # generator = torch.Generator()
+    # generator.manual_seed(42)
     # Sample complex Gaussian: real and imag ~ N(0, 1)
-    real_part = torch.randn(Nt, Nf)
-    imag_part = torch.randn(Nt, Nf)
-    out = real_part + 1j * imag_part
+    # real_part = torch.randn(Nt, Nf)
+    # imag_part = torch.randn(Nt, Nf)
+    # out = real_part + 1j * imag_part
+
+    # Grab constellation and add small complex noise
+    jitter_power = 1e-2
+    jitter = np.sqrt(jitter_power/2)*(torch.randn(Nt, Nf) + 1j * torch.randn(Nt, Nf)) 
+      #Grab constellation object
+    constellation = get_constellation(mode="m7_apsk_constellation")
+    bits = torch.randint(0, 2, size=(constellation.modulation_order * Nf * Nt, )).numpy()
+    bit_strings = [str(x) for x in bits]
+    bits = "".join(bit_strings)
+    out = torch.tensor(constellation.bits_to_symbols(bits)).reshape(Nt, Nf)
+    out += jitter
     out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
     freqs = torch.tensor(np.arange(0, f_high, subcarrier_spacing), dtype=torch.float32, device=device) # Start at 0 frequency for shape matching
 
@@ -561,8 +619,9 @@ def train_channel_model_TX(real, imag, f_low, f_high, subcarrier_spacing):
     STATE['encoder_in'] = out
 
     # Save prediction for loss calculation
-    STATE['channel_prediction'] = STATE['channel_model'](out, freqs)
-    STATE['encoder_out'] = STATE['channel_prediction']
+    if 'channel_model' in STATE:
+        STATE['channel_prediction'] = STATE['channel_model'](out, freqs)
+        STATE['encoder_out'] = STATE['channel_prediction']
     STATE['last_sent_channel'] = out
     STATE['frequencies'] = freqs[0, :].detach()
     # Attach back the zeros.
@@ -578,10 +637,12 @@ def train_channel_model_RY(real, imag):
     STATE['decoder_in'] = out
 
     # Calculate loss
-    predicted_symbols = STATE['channel_prediction']
-    loss = evm_loss_func(predicted_symbols, out)
-    append_symbol_frame(STATE['last_sent_channel'], out, STATE['frequencies'], 
-                        h5_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\fixed_ici_clipped_channel_measurements_2.636V_0.125A.h5")
+    loss = None
+    if 'channel_prediction' in STATE:
+        predicted_symbols = STATE['channel_prediction']
+        loss = evm_loss_func(predicted_symbols, out)
+    append_symbol_frame(STATE['last_sent_channel'], STATE['last_freq_symbol_received'], STATE['last_time_symbol_received'], STATE['frequencies'], 
+                        h5_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\test.h5")
     STATE['cycle_count'] += 1
     if loss is not None:
         STATE['loss_accumulator'].append(loss)
@@ -640,17 +701,17 @@ def train_channel_model_RY(real, imag):
                 else:
                     STATE['cancel_channel_train'] = False
 
-    if STATE['cycle_count'] % config.save_model_frequency == 0:
-        model_save_dir = os.path.join(script_dir, "..", "saved_models")
-        os.makedirs(model_save_dir, exist_ok=True)
+        if STATE['cycle_count'] % config.save_model_frequency == 0:
+            model_save_dir = os.path.join(script_dir, "..", "saved_models")
+            os.makedirs(model_save_dir, exist_ok=True)
 
-        for model_name in ['channel_model']:
-            model = STATE[model_name]
-            save_path = os.path.join(model_save_dir, f"{model_name}_step{STATE['cycle_count']}.pt")
-            torch.save(model.state_dict(), save_path)
-            artifact = wandb.Artifact(f"{model_name}_ckpt_step{STATE['cycle_count']}", type="model")
-            artifact.add_file(save_path)
-            wandb.log_artifact(artifact)
+            for model_name in ['channel_model']:
+                model = STATE[model_name]
+                save_path = os.path.join(model_save_dir, f"{model_name}_step{STATE['cycle_count']}.pt")
+                torch.save(model.state_dict(), save_path)
+                artifact = wandb.Artifact(f"{model_name}_ckpt_step{STATE['cycle_count']}", type="model")
+                artifact.add_file(save_path)
+                wandb.log_artifact(artifact)
 
     STATE['decoder_out'] = out
     out = out.flatten() # Must flatten along batch dimension to output from labview
@@ -1431,7 +1492,7 @@ def plot_received_vs_predicted(received_symbols: torch.Tensor,
 
 
 def append_symbol_frame(
-    sent, received, freqs,
+    sent, received, received_time, freqs,
     h5_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\singleton_data.h5",
     metadata: dict = None,
     noise_sample_indexing = False
@@ -1482,6 +1543,8 @@ def append_symbol_frame(
         # Store datasets
         grp.create_dataset("sent", data=sent, compression="gzip")
         grp.create_dataset("received", data=received, compression="gzip")
+        if received_time is not None:
+            grp.create_dataset("received_time", data=received_time, compression="gzip")
         grp.create_dataset("freqs", data=freqs)
 
         # Store metadata if provided
