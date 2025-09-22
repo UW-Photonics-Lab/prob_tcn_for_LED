@@ -1,8 +1,8 @@
-from training_state import STATE
-from noisy_state import NOISY_STATE
+# from training_state import STATE
+# from noisy_state import NOISY_STATE
 
-# from lab_scripts.training_state import STATE
-# from lab_scripts.noisy_state import NOISY_STATE
+from lab_scripts.training_state import STATE
+from lab_scripts.noisy_state import NOISY_STATE
 import h5py
 import torch
 import torch.nn as nn
@@ -41,12 +41,12 @@ def get_constellation(mode: str):
         return constellation
 
 STATE['train_model'] = False # Variable
-STATE['validate_model'] = True # Variable
+STATE['validate_model'] = False # Variable
 STATE['train_channel'] = False # Variable
-STATE['time_model'] = True
+STATE['time_model'] = False
 STATE['normalize_power'] = False
 
-load_model = True # Variable
+load_model = False # Variable
 LOAD_DIR = ""
 if load_model:
     model_name = "misty-river-3751" # Variable
@@ -208,7 +208,7 @@ class TransformerDecoder(nn.Module):
         out = self.transformer(x_embed)
         out = self.output(out)
         return out[..., 0] + 1j * out[..., 1]
-    
+
 class PositionalEncoding(nn.Module):
     """Adds information about the position of each token in the sequence."""
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
@@ -235,7 +235,7 @@ class TimeEmbedding(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.embed(x)
 
-    
+
 class RecursiveTransformer(nn.Module):
     def __init__(self,
                 taps,
@@ -297,11 +297,11 @@ class TCNBlock(nn.Module):
         return out + x  # residual connection
 
 class TCN(nn.Module):
-    def __init__(self, num_layers=3, dilation_base=2, num_taps=10, hidden_channels=32):
+    def __init__(self, nlayers=3, dilation_base=2, num_taps=10, hidden_channels=32):
         super().__init__()
         layers = []
         in_channels = 1
-        for i in range(num_layers):
+        for i in range(nlayers):
             dilation = dilation_base ** i
             layers.append(
                 TCNBlock(in_channels, hidden_channels, num_taps, dilation)
@@ -458,7 +458,7 @@ def validate_time_encoder(x_t):
         STATE['time_encoder_in'] = np.array(x_t)
         STATE['time_encoder_out'] = STATE['time_encoder_in']
         return STATE['time_encoder_in'].tolist()
-    
+
 STATE['apply_time_decoder'] = False
 def validate_time_decoder(y_t):
     # Move functionality to modulate_OFDM_python.py
@@ -545,7 +545,7 @@ def validate_encoder(real, imag, f_low, f_high, subcarrier_spacing):
         if STATE['normalize_power']:
             out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12) # Unit average power
         STATE['encoder_out'] = out
-    
+
         # Attach back the zeros.
         zeros = torch.zeros((out.shape[0], num_zeros), dtype=out.dtype, device=out.device)
         out_full = torch.cat([zeros, out], dim=1)
@@ -602,7 +602,7 @@ def symbols_for_noise(num_freqs:int, two_carrier=True):
     Nf = STATE['Nf']
 
     jitter_power = 1e-2
-    jitter = np.sqrt(jitter_power/2)*(torch.randn(Nt, Nf) + 1j * torch.randn(Nt, Nf)) 
+    jitter = np.sqrt(jitter_power/2)*(torch.randn(Nt, Nf) + 1j * torch.randn(Nt, Nf))
       #Grab constellation object
     constellation = get_constellation(mode="m7_apsk_constellation")
     bits = torch.randint(0, 2, size=(constellation.modulation_order * Nf * Nt, )).numpy()
@@ -632,7 +632,7 @@ def test_channel_ici_TX(real, imag, f_low, f_high, subcarrier_spacing):
         curr_carrierIdx = test_carrier_indices[STATE['carrier_counter']]
     except Exception as e:
         print("Too many cycles!")
-    # Set to energy 1 
+    # Set to energy 1
     out = torch.zeros(STATE['Nt'], STATE['Nf'], device=device, dtype=torch.complex64)
     out[:, curr_carrierIdx] = 1.0 + 0j
 
@@ -757,7 +757,7 @@ def train_channel_model_TX(real, imag, f_low, f_high, subcarrier_spacing):
 
     # Grab constellation and add small complex noise
     jitter_power = 1e-2
-    jitter = np.sqrt(jitter_power/2)*(torch.randn(Nt, Nf) + 1j * torch.randn(Nt, Nf)) 
+    jitter = np.sqrt(jitter_power/2)*(torch.randn(Nt, Nf) + 1j * torch.randn(Nt, Nf))
       #Grab constellation object
     constellation = get_constellation(mode="m7_apsk_constellation")
     bits = torch.randint(0, 2, size=(constellation.modulation_order * Nf * Nt, )).numpy()
@@ -798,7 +798,7 @@ def train_channel_model_RY(real, imag):
     if 'channel_prediction' in STATE:
         predicted_symbols = STATE['channel_prediction']
         loss = evm_loss_func(predicted_symbols, out)
-    append_symbol_frame(STATE['last_sent_channel'], STATE['last_freq_symbol_received'], STATE['last_time_symbol_received'], STATE['frequencies'], 
+    append_symbol_frame(STATE['last_sent_channel'], STATE['last_freq_symbol_received'], STATE['last_time_symbol_received'], STATE['frequencies'],
                         h5_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\unnormalized_channel_2.83V.h5")
     STATE['cycle_count'] += 1
     if loss is not None:
