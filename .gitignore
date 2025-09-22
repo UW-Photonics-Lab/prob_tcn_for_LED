@@ -7,6 +7,7 @@ data/*
 models/*
 debug_logs/*
 experiments/*
-*.pyc 
+*.pyc
 wandb*
 saved_models/*
+*.yml
