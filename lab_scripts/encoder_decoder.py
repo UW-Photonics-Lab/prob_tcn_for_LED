@@ -1,5 +1,8 @@
 from training_state import STATE
 from noisy_state import NOISY_STATE
+
+# from lab_scripts.training_state import STATE
+# from lab_scripts.noisy_state import NOISY_STATE
 import h5py
 import torch
 import torch.nn as nn
@@ -19,7 +22,12 @@ from transformers import get_linear_schedule_with_warmup
 import traceback
 from lab_scripts.constellation_diagram import QPSK_Constellation
 from lab_scripts.constellation_diagram import RingShapedConstellation
+import math
+import torch.nn.functional as F
+from scipy.signal import resample_poly
 script_dir = os.path.dirname(os.path.abspath(__file__))
+from lab_scripts.logging_code import *
+decode_logger = setup_logger(log_file=r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\test2.txt")
 
 def get_constellation(mode: str):
         if mode == "qpsk":
@@ -33,12 +41,15 @@ def get_constellation(mode: str):
         return constellation
 
 STATE['train_model'] = False # Variable
-STATE['validate_model'] = False # Variable
+STATE['validate_model'] = True # Variable
 STATE['train_channel'] = False # Variable
-load_model = False # Variable
+STATE['time_model'] = True
+STATE['normalize_power'] = False
+
+load_model = True # Variable
 LOAD_DIR = ""
 if load_model:
-    model_name = "azure-universe-2165" # Variable
+    model_name = "misty-river-3751" # Variable
     base_dir = r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\models\pickled_models"
     LOAD_DIR = os.path.join(base_dir, model_name)
     with open(os.path.join(LOAD_DIR, "config.json"), "r") as f:
@@ -160,7 +171,7 @@ class SymbolEmbedding(nn.Module):
         return self.linear(combined) # [Nt, Nf, 2] -> [Nt, Nf, d_model]
 
 class TransformerEncoder(nn.Module):
-    def __init__(self, d_model, nhead, nlayers, dim_feedforward, dropout, freq_embed_type, normalize_freq, norm_first=config.pre_layer_norm,
+    def __init__(self, d_model, nhead, nlayers, dim_feedforward, dropout, freq_embed_type, normalize_freq, norm_first=True,
         Nf=370):
         super().__init__()
         self.freq_embed_type = freq_embed_type
@@ -172,7 +183,7 @@ class TransformerEncoder(nn.Module):
             self.freq_embed = None  # no frequency embedding
 
         self.symbol_embed = SymbolEmbedding(d_model)
-        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward=dim_feedforward, batch_first=True, dropout=dropout, norm_first=norm_first)
+        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward=dim_feedforward, batch_first=True, dropout=dropout, norm_first=True)
         self.transformer = nn.TransformerEncoder(encoder_layer, nlayers)
         self.output = nn.Linear(d_model, 2)
 
@@ -185,7 +196,7 @@ class TransformerEncoder(nn.Module):
         return out[..., 0] + 1j * out[..., 1] # Real and Imag
 
 class TransformerDecoder(nn.Module):
-    def __init__(self, d_model, nhead, nlayers, dim_feedforward, dropout, norm_first=config.pre_layer_norm):
+    def __init__(self, d_model, nhead, nlayers, dim_feedforward, dropout, norm_first=True):
         super().__init__()
         self.sym_embed = SymbolEmbedding(d_model)
         decoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward=dim_feedforward, batch_first=True, dropout=dropout, norm_first=norm_first)
@@ -197,6 +208,114 @@ class TransformerDecoder(nn.Module):
         out = self.transformer(x_embed)
         out = self.output(out)
         return out[..., 0] + 1j * out[..., 1]
+    
+class PositionalEncoding(nn.Module):
+    """Adds information about the position of each token in the sequence."""
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        pe = torch.zeros(1, max_len, d_model)
+        pe[0, :, 0::2] = torch.sin(position * div_term)
+        pe[0, :, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Args: x: Tensor, shape [batch_size, seq_len, embedding_dim]"""
+        x = x + self.pe[:, :x.size(1)]
+        return self.dropout(x)
+
+class TimeEmbedding(nn.Module):
+    """Embeds a 1D time-series input to a d_model dimension."""
+    def __init__(self, d_model: int):
+        super().__init__()
+        self.embed = nn.Linear(1, d_model)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.embed(x)
+
+    
+class RecursiveTransformer(nn.Module):
+    def __init__(self,
+                taps,
+                d_model,
+                nhead,
+                dim_feedforward,
+                nlayers,
+                dropout):
+        super().__init__()
+        self.taps = taps
+        self.time_embed = TimeEmbedding(d_model)
+        self.pos_embed = PositionalEncoding(d_model, max_len=taps)
+        encoder_layer = nn.TransformerEncoderLayer(d_model,
+                                                nhead,
+                                                dim_feedforward=dim_feedforward,
+                                                batch_first=True,
+                                                dropout=dropout)
+        self.transformer = nn.TransformerEncoder(encoder_layer, nlayers)
+        self.output_unembed = nn.Linear(d_model, 1)
+
+
+    def forward(self, x):
+        # Pad input
+        B, N = x.shape
+        x_padded = F.pad(x, (self.taps - 1, 0))
+        sliding_windows = x_padded.unfold(dimension=1, size=self.taps, step=1)
+        sliding_windows_flat = sliding_windows.reshape(-1, self.taps)
+        embedded_windows = self.time_embed(sliding_windows_flat.unsqueeze(-1))
+        embedded_windows = self.pos_embed(embedded_windows)
+        out_windows = self.transformer(embedded_windows)
+        out = out_windows[:, -1, :] # [B, N, taps, dmodel] -> [B, N, dmodel]
+        out = self.output_unembed(out) # [B, N, 1]
+        out = out.reshape(B, N)
+        out -= torch.mean(out, dim=-1, keepdim=True)
+        return out
+
+class TCNBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, dilation):
+        super().__init__()
+        self.conv = nn.Conv1d(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            dilation=dilation,
+            padding=(kernel_size - 1) * dilation
+        )
+        self.relu = nn.ReLU()
+        self.resample = None
+        if in_channels != out_channels:
+            self.resample = nn.Conv1d(in_channels, out_channels, kernel_size=1)
+
+    def forward(self, x):
+        out = self.conv(x)
+        out = self.relu(out)
+        if out.size(2) > x.size(2):
+            out = out[:, :, :x.size(2)]
+        if self.resample:
+            x = self.resample(x)
+        return out + x  # residual connection
+
+class TCN(nn.Module):
+    def __init__(self, num_layers=3, dilation_base=2, num_taps=10, hidden_channels=32):
+        super().__init__()
+        layers = []
+        in_channels = 1
+        for i in range(num_layers):
+            dilation = dilation_base ** i
+            layers.append(
+                TCNBlock(in_channels, hidden_channels, num_taps, dilation)
+            )
+            in_channels = hidden_channels
+        self.tcn = nn.Sequential(*layers)
+        self.readout = nn.Conv1d(hidden_channels, 1, kernel_size=1)
+
+    def forward(self, x):
+        x = x.unsqueeze(1)    # [B,1,T]
+        out = self.tcn(x)     # [B,H,T]
+        out = self.readout(out).squeeze(1)
+        out -= out.mean(dim=1, keepdim=True)  # [B,T]
+        return out
 
 def evm_loss(true_symbols, predicted_symbols):
         return torch.mean((true_symbols.real - predicted_symbols.real) ** 2 + (true_symbols.imag - predicted_symbols.imag) ** 2)
@@ -204,27 +323,45 @@ def evm_loss(true_symbols, predicted_symbols):
 if load_model:
     with open(os.path.join(LOAD_DIR, "config.json"), "r") as f:
         remote_config = json.load(f)
+    if  STATE['time_model']:
+        encoder = TCN(
+            num_layers=remote_config['nlayers'],
+            dilation_base=remote_config['dilation_base'],
+            num_taps=remote_config['num_taps'],
+            hidden_channels=remote_config['hidden_channels']
+        )
+        encoder.load_state_dict(torch.load(os.path.join(LOAD_DIR, "encoder_weights.pth")))
+        encoder.eval()
 
-    encoder = TransformerEncoder(d_model=remote_config['d_model'],
-                                nhead=remote_config['nhead'],
-                                nlayers=remote_config['nlayers'],
-                                dim_feedforward=remote_config['dim_feedforward'],
-                                dropout=remote_config['dropout'],
-                                freq_embed_type=remote_config['freq_embed_type'],
-                                normalize_freq=remote_config['normalize_freq'])
-    encoder.load_state_dict(torch.load(os.path.join(LOAD_DIR, "encoder_weights.pth")))
-    encoder.eval()
+        decoder = TCN(
+            num_layers=remote_config['nlayers'],
+            dilation_base=remote_config['dilation_base'],
+            num_taps=remote_config['num_taps'],
+            hidden_channels=remote_config['hidden_channels']
+        )
+        decoder.load_state_dict(torch.load(os.path.join(LOAD_DIR, "decoder_weights.pth")))
+        decoder.eval()
 
-    decoder = TransformerDecoder(d_model=remote_config['d_model'],
-                                nhead=remote_config['nhead'],
-                                nlayers=remote_config['nlayers'],
-                                dim_feedforward=remote_config['dim_feedforward'],
-                                dropout=remote_config['dropout'])
-    decoder.load_state_dict(torch.load(os.path.join(LOAD_DIR, "decoder_weights.pth")))
-    decoder.eval()
+    else:
+        encoder = TransformerEncoder(d_model=remote_config['d_model'],
+                                    nhead=remote_config['nhead'],
+                                    nlayers=remote_config['nlayers'],
+                                    dim_feedforward=remote_config['dim_feedforward'],
+                                    dropout=remote_config['dropout'],
+                                    freq_embed_type=remote_config['freq_embed_type'],
+                                    normalize_freq=remote_config['normalize_freq'])
+        encoder.load_state_dict(torch.load(os.path.join(LOAD_DIR, "encoder_weights.pth")))
+        encoder.eval()
+
+        decoder = TransformerDecoder(d_model=remote_config['d_model'],
+                                    nhead=remote_config['nhead'],
+                                    nlayers=remote_config['nlayers'],
+                                    dim_feedforward=remote_config['dim_feedforward'],
+                                    dropout=remote_config['dropout'])
+        decoder.load_state_dict(torch.load(os.path.join(LOAD_DIR, "decoder_weights.pth")))
+        decoder.eval()
 
 else:
-    # === Initialize models on device ===
     encoder = TransformerEncoder(d_model=config.d_model,
                                 nhead=config.nhead,
                                 nlayers=config.nlayers,
@@ -246,10 +383,6 @@ else:
                                 dropout=config.dropout,
                                 freq_embed_type=config.freq_embed_type,
                                 normalize_freq=config.normalize_freq).to(device)
-
-# encoder = encoder.half()
-# decoder = decoder.half()
-
 
 def apply_weight_init(model, method):
     for name, module in model.named_modules():
@@ -310,6 +443,28 @@ def evm_loss_func(true_symbols, predicted_symbols):
                       (true_symbols.imag - predicted_symbols.imag) ** 2)
 
 
+def validate_time_encoder(x_t):
+    assert STATE["time_model"] == True
+    if STATE['run_model']:
+        with torch.no_grad():
+            x_t = torch.tensor(x_t, dtype=torch.float32)
+            # decode_logger.debug(f"Encoder in {x_t.shape}")
+            STATE['time_encoder_in'] = x_t.detach().cpu().numpy()
+            x_t = STATE["encoder"](x_t)
+            # decode_logger.debug(f"Encoder out {x_t.shape}")
+            STATE['time_encoder_out'] = x_t.detach().cpu().numpy()
+        return x_t.real.detach().cpu().numpy().tolist()
+    else:
+        STATE['time_encoder_in'] = np.array(x_t)
+        STATE['time_encoder_out'] = STATE['time_encoder_in']
+        return STATE['time_encoder_in'].tolist()
+    
+STATE['apply_time_decoder'] = False
+def validate_time_decoder(y_t):
+    # Move functionality to modulate_OFDM_python.py
+    assert STATE["time_model"] == True
+    STATE['apply_time_decoder'] = True
+    return y_t
 
 def verify_synchronization_TX(real, imag, f_low, f_high, subcarrier_spacing):
     STATE['verify_synchronization'] = True
@@ -318,17 +473,14 @@ def verify_synchronization_TX(real, imag, f_low, f_high, subcarrier_spacing):
     # Generate Single Tone
     X_test = torch.zeros(Nt, Nf, dtype=torch.complex64)
     X_test[:, probe] = 1
-    X_test = X_test / (torch.mean(X_test.abs().pow(2), dim=1).sqrt())
+    if STATE['normalize_power']:
+        X_test = X_test / (torch.mean(X_test.abs().pow(2), dim=1).sqrt())
     zeros = torch.zeros((X_test.shape[0], STATE['num_zeros']), dtype=X_test.dtype, device=X_test.device)
     out_full = torch.cat([zeros, X_test], dim=1)
     return out_full.real.numpy().tolist(), out_full.imag.numpy().tolist()
 
-
-
 def verify_synchronization_Ry():
     pass
-
-
 
 STATE['run_model'] = True
 def validate_ici_matrix_TX(real, imag, f_low, f_high, subcarrier_spacing):
@@ -346,7 +498,6 @@ def validate_ici_matrix_TX(real, imag, f_low, f_high, subcarrier_spacing):
     STATE['encoder_out'] = out[:, num_zeros:]
     return  out.real.detach().cpu().numpy().tolist(), out.imag.detach().cpu().numpy().tolist()
 
-
 def validate_ici_matrix_RY(real, imag):
     # Reshape input to [Nt, Nf]
     Nt, Nf = STATE['encoder_out'].shape
@@ -363,7 +514,8 @@ def validate_ici_matrix_RY(real, imag):
         print("Average Power Before Matrix", out.abs().square().mean(dim=1))
         out = out @ H_ici_inv # [Nt, Nf]
         print("Average Power with Matrix", out.abs().square().mean(dim=1))
-        out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
+        if STATE['normalize_power']:
+            out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
         STATE['decoder_out'] = out
         out = out.flatten() # Must flatten along batch dimension to output from labview
         return out.real.detach().cpu().contiguous().numpy().tolist(), out.imag.detach().cpu().contiguous().numpy().tolist()
@@ -377,25 +529,23 @@ def validate_ici_matrix_RY(real, imag):
         out = out.flatten()
         return out.real.detach().cpu().contiguous().numpy().tolist(), out.imag.detach().cpu().contiguous().numpy().tolist()
 
-
 STATE['run_model'] = True
 def validate_encoder(real, imag, f_low, f_high, subcarrier_spacing):
     real = torch.tensor(real, dtype=torch.float32, device=device)
     imag = torch.tensor(imag, dtype=torch.float32, device=device)
     num_zeros = STATE['num_zeros']
+    freqs = torch.arange(0, f_high, subcarrier_spacing, dtype=torch.float32, device=device)
+    freqs = freqs.unsqueeze(0).repeat(STATE['Nt'], 1)
+    freqs = freqs[:, num_zeros + 1:]
+    STATE['frequencies'] = freqs[0, :].detach()
+    x = real + 1j * imag
     if STATE['run_model']:
-        freqs = torch.arange(0, f_high, subcarrier_spacing, dtype=torch.float32, device=device)
-        freqs = freqs.unsqueeze(0).repeat(STATE['Nt'], 1)
-
-        freqs = freqs[:, num_zeros + 1:]
-        x = real + 1j * imag
-
         STATE['encoder_in'] = x[:, num_zeros:]
         out = STATE['encoder'](STATE['encoder_in'], freqs)
-        out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12) # Unit average power
+        if STATE['normalize_power']:
+            out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12) # Unit average power
         STATE['encoder_out'] = out
-        STATE['frequencies'] = freqs[0, :].detach()
-
+    
         # Attach back the zeros.
         zeros = torch.zeros((out.shape[0], num_zeros), dtype=out.dtype, device=out.device)
         out_full = torch.cat([zeros, out], dim=1)
@@ -404,11 +554,12 @@ def validate_encoder(real, imag, f_low, f_high, subcarrier_spacing):
         # No model
         out = real + 1j * imag
         STATE['encoder_in'] = out[:, num_zeros:]
+        STATE['encoder_out'] = STATE['encoder_in']
         return  out.real.detach().cpu().numpy().tolist(), out.imag.detach().cpu().numpy().tolist()
 
 def validate_decoder(real, imag):
     # Reshape input to [Nt, Nf]
-    Nt, Nf = STATE['encoder_out'].shape
+    Nt, Nf = STATE['Nt'], STATE['Nf']
     if STATE['run_model'] :
         real = torch.tensor(real, dtype=torch.float32, device=device).reshape(Nt, Nf)
         imag = torch.tensor(imag, dtype=torch.float32, device=device).reshape(Nt, Nf)
@@ -468,10 +619,10 @@ def symbols_for_noise(num_freqs:int, two_carrier=True):
     if two_carrier:
         out[:, (NOISY_STATE["distinct_symbol"] // num_freqs) % num_freqs] = s_samples[:, 1]
 
-    out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
+    if STATE['normalize_power']:
+        out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
     NOISY_STATE["prior_symbol"] = out
     return out
-
 
 STATE['carrier_counter'] = 0
 def test_channel_ici_TX(real, imag, f_low, f_high, subcarrier_spacing):
@@ -488,7 +639,8 @@ def test_channel_ici_TX(real, imag, f_low, f_high, subcarrier_spacing):
     # real_part = torch.randn(STATE['Nt'], STATE['Nf'])
     # imag_part = torch.randn(STATE['Nt'], STATE['Nf'])
     # out = real_part + 1j * imag_part
-    out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
+    if STATE['normalize_power']:
+        out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
     STATE['last_sent_channel'] = out
     # Attach back the zeros.
     num_zeros = STATE['num_zeros']
@@ -565,7 +717,8 @@ def solve_channel_noise_TX(real, imag, f_low, f_high, subcarrier_spacing):
     STATE['encoder_in'] = out
 
     # Save prediction for loss calculation
-    out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
+    if STATE['normalize_power']:
+        out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
     STATE['last_sent_channel'] = out
     STATE['frequencies'] = freqs[0, :].detach()
 
@@ -612,7 +765,8 @@ def train_channel_model_TX(real, imag, f_low, f_high, subcarrier_spacing):
     bits = "".join(bit_strings)
     out = torch.tensor(constellation.bits_to_symbols(bits)).reshape(Nt, Nf)
     out += jitter
-    out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
+    if STATE['normalize_power']:
+        out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
     freqs = torch.tensor(np.arange(0, f_high, subcarrier_spacing), dtype=torch.float32, device=device) # Start at 0 frequency for shape matching
 
     # Update freqs to match shape [Nt, Nf]
@@ -622,7 +776,7 @@ def train_channel_model_TX(real, imag, f_low, f_high, subcarrier_spacing):
     STATE['encoder_in'] = out
 
     # Save prediction for loss calculation
-    if 'channel_model' in STATE:
+    if 'channel_model' in STATE and STATE['train_model']:
         STATE['channel_prediction'] = STATE['channel_model'](out, freqs)
         STATE['encoder_out'] = STATE['channel_prediction']
     STATE['last_sent_channel'] = out
@@ -645,7 +799,7 @@ def train_channel_model_RY(real, imag):
         predicted_symbols = STATE['channel_prediction']
         loss = evm_loss_func(predicted_symbols, out)
     append_symbol_frame(STATE['last_sent_channel'], STATE['last_freq_symbol_received'], STATE['last_time_symbol_received'], STATE['frequencies'], 
-                        h5_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\test.h5")
+                        h5_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\unnormalized_channel_2.83V.h5")
     STATE['cycle_count'] += 1
     if loss is not None:
         STATE['loss_accumulator'].append(loss)
@@ -719,6 +873,23 @@ def train_channel_model_RY(real, imag):
     STATE['decoder_out'] = out
     out = out.flatten() # Must flatten along batch dimension to output from labview
     return out.real.detach().cpu().contiguous().numpy().tolist(), out.imag.detach().cpu().contiguous().numpy().tolist()
+
+def debug_pipeline_Tx(real, imag, f_low, f_high, subcarrier_spacing):
+    Nf, Nt = STATE['Nf'], STATE['Nt']
+    out =  torch.zeros(Nt, Nf, dtype=torch.complex64)
+    out[:, 100] = 10
+
+    zeros = torch.zeros((out.shape[0], STATE['num_zeros']), dtype=out.dtype, device=out.device)
+    out_full = torch.cat([zeros, out], dim=1)
+    return out_full.real.detach().cpu().numpy().tolist(), out_full.imag.detach().cpu().numpy().tolist()
+
+def debug_pipeline_Ry(real, imag):
+    real = torch.tensor(real, dtype=torch.float32, device=device).reshape(STATE['Nt'], STATE['Nf'])
+    imag = torch.tensor(imag, dtype=torch.float32, device=device).reshape(STATE['Nt'], STATE['Nf'])
+    out = real + 1j * imag
+    out = out.flatten() # Must flatten along batch dimension to output from labview
+    return out.real.detach().cpu().contiguous().numpy().tolist(), out.imag.detach().cpu().contiguous().numpy().tolist()
+
 
 # Called in Labview
 def run_encoder(real, imag, f_low, f_high, subcarrier_spacing):
@@ -1546,7 +1717,13 @@ def append_symbol_frame(
         # Store datasets
         grp.create_dataset("sent", data=sent, compression="gzip")
         grp.create_dataset("received", data=received, compression="gzip")
+
+
         if received_time is not None:
+            cp_length = STATE['cp_length']
+            num_points_symbol = STATE['num_points_symbol']
+            grp.create_dataset("num_points_symbol", data=num_points_symbol)
+            grp.create_dataset("cp_length", data=cp_length)
             grp.create_dataset("received_time", data=received_time, compression="gzip")
         grp.create_dataset("freqs", data=freqs)
 
