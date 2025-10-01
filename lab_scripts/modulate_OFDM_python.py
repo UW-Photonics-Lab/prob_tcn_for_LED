@@ -649,7 +649,6 @@ def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,
     
     return decided_bits_flat, float(BER), evm, PowerFactor, cancel_run_early
 
-
 def make_validate_plots(encoder_in, decoder_out, frame_BER, run_model, freqs=None):
     """
     Logs EVM loss, frame BER, and constellation diagram to wandb.
@@ -781,6 +780,44 @@ def make_time_validate_plots(encoder_in, encoder_out, decoder_in, decoder_out, f
     fig.savefig(plot_path, dpi=150)
     wandb.log({f"{prefix}time_signals": wandb.Image(plot_path)})
     plt.close(fig)
+
+    freq_sent = np.asarray(STATE['last_sent']).flatten()
+    freq_received = np.asarray(STATE['last_received']).flatten()
+    fig_const, axc = plt.subplots(figsize=(6, 6))
+    axc.scatter(freq_sent.real, freq_sent.imag, c='r', alpha=0.5, s=10, label='Sent')
+    axc.scatter(freq_received.real, freq_received.imag, c='b', alpha=0.5, s=10, label='Received')
+    axc.set_title("Constellation Diagram")
+    axc.set_xlabel("In-Phase")
+    axc.set_ylabel("Quadrature")
+    axc.legend()
+    axc.grid(True)
+    plot_path_const = f"wandb_time_domain/{prefix}constellation.png"
+    os.makedirs(os.path.dirname(plot_path_const), exist_ok=True)
+    fig_const.tight_layout()
+    fig_const.savefig(plot_path_const, dpi=150)
+    wandb.log({f"{prefix}constellation": wandb.Image(plot_path_const)})
+    plt.close(fig_const)
+
+    min_len = min(len(freq_sent), len(freq_received))
+    freq_sent = freq_sent[:min_len]
+    freq_received = freq_received[:min_len]
+
+    evm_per_freq = (np.abs(freq_received - freq_sent) ** 2) / (np.abs(freq_sent) ** 2 + 1e-12)
+
+    freqs_axis = np.arange(min_len)
+    fig_evm, axe = plt.subplots(figsize=(10, 4))
+    axe.plot(freqs_axis, evm_per_freq, 'b-', linewidth=1)
+    axe.set_title("EVM per Frequency")
+    axe.set_xlabel("Subcarrier Index")
+    axe.set_ylabel("EVM (dB)")
+    axe.grid(True)
+    plot_path_evm = f"wandb_time_domain/{prefix}evm_per_freq.png"
+    os.makedirs(os.path.dirname(plot_path_evm), exist_ok=True)
+    fig_evm.tight_layout()
+    fig_evm.savefig(plot_path_evm, dpi=150)
+    wandb.log({f"{prefix}evm_per_freq": wandb.Image(plot_path_evm)})
+    plt.close(fig_evm)
+
     if os.path.exists(plot_path):
         os.remove(plot_path)
     if STATE['run_model']:
