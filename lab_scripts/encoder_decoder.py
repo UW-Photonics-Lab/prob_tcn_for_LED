@@ -311,7 +311,7 @@ class LearnableFrequencyNoise(nn.Module):
         return time_domain_noise
 
 class TCN(nn.Module):
-    def __init__(self, sequence_length, nlayers=3, dilation_base=2, num_taps=10, hidden_channels=32):
+    def __init__(self, sequence_length, nlayers=3, dilation_base=2, num_taps=10, hidden_channels=32, use_noise=False):
         super().__init__()
         layers = []
         in_channels = 1
@@ -323,14 +323,19 @@ class TCN(nn.Module):
             in_channels = hidden_channels
         self.tcn = nn.Sequential(*layers)
         self.readout = nn.Conv1d(hidden_channels, 1, kernel_size=1)
-        self.noise_generator = LearnableFrequencyNoise(sequence_length)
+        if use_noise:
+            self.noise_generator = LearnableFrequencyNoise(sequence_length)
+        else:
+            self.noise_generator = None
 
     def forward(self, xin):
         x = xin.unsqueeze(1)    # [B,1,T]
         out = self.tcn(x)     # [B,H,T]
         out = self.readout(out).squeeze(1)
         out = out - out.mean(dim=1, keepdim=True)  # [B,T]
-        return out + self.noise_generator(xin) # Add frequency noise
+        if self.noise_generator is not None:
+            out = out + self.noise_generator(xin) # Add frequency noise
+        return out
 
 def evm_loss(true_symbols, predicted_symbols):
         return torch.mean((true_symbols.real - predicted_symbols.real) ** 2 + (true_symbols.imag - predicted_symbols.imag) ** 2)
