@@ -49,7 +49,7 @@ STATE['normalize_power'] = False
 load_model = True # Variable
 LOAD_DIR = ""
 if load_model:
-    model_name = "eager-deluge-4130" # Variable
+    model_name = "fallen-sun-4139" # Variable
     base_dir = r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\models\pickled_models"
     LOAD_DIR = os.path.join(base_dir, model_name)
     with open(os.path.join(LOAD_DIR, "config.json"), "r") as f:
@@ -340,19 +340,23 @@ if load_model:
         remote_config = json.load(f)
     if  STATE['time_model']:
         encoder = TCN(
+            sequence_length=remote_config['num_points_symbol'],
             nlayers=remote_config['nlayers'],
             dilation_base=remote_config['dilation_base'],
             num_taps=remote_config['num_taps'],
-            hidden_channels=remote_config['hidden_channels']
+            hidden_channels=remote_config['hidden_channels'],
+            use_noise=remote_config['use_noise']
         )
         encoder.load_state_dict(torch.load(os.path.join(LOAD_DIR, "encoder_weights.pth")))
         encoder.eval()
 
         decoder = TCN(
+            sequence_length=remote_config['num_points_symbol'],
             nlayers=remote_config['nlayers'],
             dilation_base=remote_config['dilation_base'],
             num_taps=remote_config['num_taps'],
-            hidden_channels=remote_config['hidden_channels']
+            hidden_channels=remote_config['hidden_channels'],
+            use_noise=remote_config['use_noise']
         )
         decoder.load_state_dict(torch.load(os.path.join(LOAD_DIR, "decoder_weights.pth")))
         decoder.eval()
