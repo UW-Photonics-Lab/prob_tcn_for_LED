@@ -269,7 +269,7 @@ class RecursiveTransformer(nn.Module):
         out = out_windows[:, -1, :] # [B, N, taps, dmodel] -> [B, N, dmodel]
         out = self.output_unembed(out) # [B, N, 1]
         out = out.reshape(B, N)
-        out -= torch.mean(out, dim=-1, keepdim=True)
+        out = out - out.mean(dim=1, keepdim=True)
         return out
 
 class TCNBlock(nn.Module):
@@ -296,8 +296,24 @@ class TCNBlock(nn.Module):
             x = self.resample(x)
         return out + x  # residual connection
 
+class LearnableFrequencyNoise(nn.Module):
+    def __init__(self, sequence_length: int):
+        super().__init__()
+        num_freq_bins = sequence_length // 2 + 1
+        self.noise_psd = nn.Parameter(torch.zeros(num_freq_bins))
+
+    def forward(self, x):
+        batch_size, seq_len = x.shape
+        noise_power = F.softplus(self.noise_psd)
+        noise_amplitude = torch.sqrt(noise_power)
+        noise_amplitude_batch = noise_amplitude.unsqueeze(0).expand(batch_size, -1)
+        random_phase = torch.exp(1j * 2 * torch.pi * torch.rand_like(noise_amplitude_batch))
+        noise_fft = noise_amplitude_batch * random_phase
+        time_domain_noise = torch.fft.irfft(noise_fft, n=seq_len)
+        return time_domain_noise
+
 class TCN(nn.Module):
-    def __init__(self, nlayers=3, dilation_base=2, num_taps=10, hidden_channels=32):
+    def __init__(self, sequence_length, nlayers=3, dilation_base=2, num_taps=10, hidden_channels=32):
         super().__init__()
         layers = []
         in_channels = 1
@@ -309,13 +325,14 @@ class TCN(nn.Module):
             in_channels = hidden_channels
         self.tcn = nn.Sequential(*layers)
         self.readout = nn.Conv1d(hidden_channels, 1, kernel_size=1)
+        self.noise_generator = LearnableFrequencyNoise(sequence_length)
 
-    def forward(self, x):
-        x = x.unsqueeze(1)    # [B,1,T]
+    def forward(self, xin):
+        x = xin.unsqueeze(1)    # [B,1,T]
         out = self.tcn(x)     # [B,H,T]
         out = self.readout(out).squeeze(1)
-        out -= out.mean(dim=1, keepdim=True)  # [B,T]
-        return out
+        out = out - out.mean(dim=1, keepdim=True)  # [B,T]
+        return out + self.noise_generator(xin) # Add frequency noise
 
 def evm_loss(true_symbols, predicted_symbols):
         return torch.mean((true_symbols.real - predicted_symbols.real) ** 2 + (true_symbols.imag - predicted_symbols.imag) ** 2)
