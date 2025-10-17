@@ -269,32 +269,20 @@ class RecursiveTransformer(nn.Module):
         out = out.reshape(B, N)
         out = out - out.mean(dim=1, keepdim=True)
         return out
-
-class TCNBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, dilation):
-        super().__init__()
-        self.conv = nn.Conv1d(
-            in_channels,
-            out_channels,
-            kernel_size=kernel_size,
-            dilation=dilation,
-            padding=(kernel_size - 1) * dilation
-        )
-        self.relu = nn.ReLU()
-        self.resample = None
-        if in_channels != out_channels:
-            self.resample = nn.Conv1d(in_channels, out_channels, kernel_size=1)
-
-    def forward(self, x):
-        out = self.conv(x)
-        out = self.relu(out)
-        if out.size(2) > x.size(2):
-            out = out[:, :, :x.size(2)]
-        if self.resample:
-            x = self.resample(x)
-        return out + x  # residual connection
+def sample_student_t_mps(mean, std, nu):
+    '''
+    Wilson-Hilferty Approximation for chi^2 converted to scaled and shifted student t
+    '''
+    z = torch.randn_like(mean)
+    z_chi = torch.randn_like(mean)
+    chi2_approx = nu * (1 - 2/(9*nu) + z_chi * torch.sqrt(2/(9*nu))).pow(3)
+    chi2_approx = chi2_approx.clamp(min=0.01)
+    scale = torch.sqrt(nu / chi2_approx)
+    return mean + std * z * scale
 
 
+
+GAUSSIAN = False
 class TCN(nn.Module):
     def __init__(self, nlayers=3, dilation_base=2, num_taps=10, hidden_channels=32):
         super().__init__()
@@ -309,12 +297,44 @@ class TCN(nn.Module):
         self.tcn = nn.Sequential(*layers)
         self.readout = nn.Conv1d(hidden_channels, 1, kernel_size=1)
 
+        # Calculate the total receptive field for the whole TCN stack
+        self.receptive_field = 1
+        for i in range(nlayers):
+            dilation = dilation_base ** i
+            self.receptive_field += (num_taps - 1) * dilation
+
     def forward(self, xin):
         x = xin.unsqueeze(1)    # [B,1,T]
         out = self.tcn(x)     # [B,H,T]
         out = self.readout(out).squeeze(1)
         out = out - out.mean(dim=1, keepdim=True)  # [B,T]
         return out
+
+class TCNBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, dilation):
+        super().__init__()
+        self.conv = nn.Conv1d(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            dilation=dilation,
+            padding=0
+        )
+        self.padding = (kernel_size - 1) * dilation
+        self.relu = nn.ReLU()
+        self.resample = None
+        if in_channels != out_channels:
+            self.resample = nn.Conv1d(in_channels, out_channels, kernel_size=1)
+
+    def forward(self, x):
+        out = F.pad(x, (self.padding, 0))
+        out = self.conv(out)
+        out = self.relu(out)
+        if out.size(2) > x.size(2):
+            out = out[:, :, :x.size(2)]
+        if self.resample:
+            x = self.resample(x)
+        return out + x  # residual connection
 
 class TCN_channel(nn.Module):
     def __init__(self, nlayers=3, dilation_base=2, num_taps=10, hidden_channels=32, learn_noise=False):
@@ -329,23 +349,32 @@ class TCN_channel(nn.Module):
             in_channels = hidden_channels
         self.learn_noise = learn_noise
         self.tcn = nn.Sequential(*layers)
-        self.readout = nn.Conv1d(hidden_channels, 2, kernel_size=1) # 2 channels mean | std
+        self.readout = nn.Conv1d(hidden_channels, 3, kernel_size=1) # 3 channels mean | std | nu
+        self.num_taps = num_taps
 
     def forward(self, xin):
         x = xin.unsqueeze(1)    # [B,1,T]
         out = self.tcn(x)     # [B,H,T]
-        out = self.readout(out) # [B, 2, T] mean | std
+        out = self.readout(out) # [B, 3, T] mean | std | nu
         mean_out = out[:, 0, :]
         log_std_out = out[:, 1, :]
-
+        log_nu_out = out[:, 2, :]
         std_out = torch.exp(log_std_out)
-        epsilon = torch.randn_like(std_out) # Sample from N(0, 1)
+        nu_out = torch.exp(log_nu_out) + 2 # Ensure finite variance
+
         mean_out = mean_out - mean_out.mean(dim=1, keepdim=True)  # [B ,T]
-        if self.learn_noise:
-            out = mean_out + epsilon * std_out
-            return out, mean_out, epsilon * std_out
+
+        # # Produce noise output from student's-t
+        if GAUSSIAN:
+            z = torch.randn_like(mean_out)
+            noisy_out = mean_out + std_out * z
+            nu_out = torch.zeros_like(mean_out)
         else:
-            return mean_out
+            noisy_out = sample_student_t_mps(mean_out, std_out, nu_out)
+        if self.learn_noise:
+            return noisy_out, mean_out, std_out, nu_out
+        else:
+            return mean_out, mean_out, torch.zeros_like(mean_out)
 
 def evm_loss(true_symbols, predicted_symbols):
         return torch.mean((true_symbols.real - predicted_symbols.real) ** 2 + (true_symbols.imag - predicted_symbols.imag) ** 2)
