@@ -15,6 +15,7 @@ import os
 import wandb
 from training_state import STATE
 import torch
+import torch.nn.functional as F
 import matplotlib.cm as cm
 import matplotlib.colors as colors
 from scipy.fft import irfft, rfft
@@ -25,7 +26,8 @@ from scipy.signal import hilbert
 from lab_scripts.logging_code import *
 STATE['normalize_power'] = False
 STATE['verify_synchronization'] = False
-decode_logger = setup_logger(log_file=r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\test.txt")
+STATE['in_band_filter'] = False
+decode_logger = setup_logger(log_file=r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\test3.txt")
 STATE['sent_symbols'] = []
 STATE['received_symbols'] = []
 STATE['channel_estimates'] = []
@@ -131,7 +133,7 @@ def modulate_data_OFDM(mode: str,
 
 
 AWG_MEMORY_LENGTH_MAX = 16384
-SCALING_FACTOR = 8
+SCALING_FACTOR = 2
 MESSAGE_LENGTH = 16384 // SCALING_FACTOR
 BARKER_RATIO = 0.01
 BARKER_LENGTH = int(BARKER_RATIO * (MESSAGE_LENGTH)) if int(BARKER_RATIO * (MESSAGE_LENGTH)) > 5 else 5
@@ -152,6 +154,34 @@ def symbols_to_time(X, upsampling_factor: int, num_leading_zeros):
     # Convert to time domain
     x_time = np.fft.ifft(X_full, axis=-1, norm="ortho").real
     return x_time
+
+
+def generate_zadoff_chu(length, root=1):
+    """Generate Zadoff-Chu sequence"""
+    n = np.arange(length)
+    if length % 2 == 0:
+        zc = np.exp(-1j * np.pi * root * n * (n + 1) / length)
+    else:
+        zc = np.exp(-1j * np.pi * root * n**2 / length)
+    return zc
+
+def nearest_prime(n):
+    """Find nearest prime number"""
+    def is_prime(num):
+        if num < 2:
+            return False
+        for i in range(2, int(np.sqrt(num)) + 1):
+            if num % i == 0:
+                return False
+        return True
+    
+    for offset in range(n):
+        if is_prime(n + offset):
+            return n + offset
+        if n - offset > 0 and is_prime(n - offset):
+            return n - offset
+    return n
+
 
 def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: list[list[float]]) -> list[float]:
     '''Takes a symbol frame matrix and converts and x(t) frame matrix
@@ -177,8 +207,12 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
     STATE['last_sent'] = torch.tensor(symbol_groups[:, data_lo:data_hi])
     STATE['sent_symbols'].append(STATE['last_sent'])
     N_t = symbol_groups.shape[0]
-    barker_code = 3 *  np.array([1, -1, 1, -1, 1,-1, 1, -1, 1], dtype=float)
-    barker_code = np.repeat(barker_code, BARKER_LENGTH // len(barker_code)) # Set as 1%
+    # barker_code = 3 *  np.array([0, 0, 0, 1, -1, 1, -1, 1,-1, 1, -1, 1, 0, 0, 0], dtype=float)
+    # barker_code = np.repeat(barker_code, BARKER_LENGTH // len(barker_code)) # Set as 1%
+
+    zc_length = nearest_prime(BARKER_LENGTH)
+    zc_sequence = generate_zadoff_chu(zc_length, root=1)
+    barker_code = 3 * zc_sequence.real
   
     SYMBOL_LENGTH = (MESSAGE_LENGTH - len(barker_code)) // N_t
     IFFT_LENGTH = int(SYMBOL_LENGTH * (1 - CP_RATIO))
@@ -195,7 +229,7 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
     assert half_spectrum.shape[1] == (IFFT_LENGTH // 2 + 1), "Half-spectrum length mismatch."
 
     cyclic_prefix_length = int(SYMBOL_LENGTH * CP_RATIO)
-    decode_logger.debug(f"IFFT padding zeros {number_of_zeros}")
+    # decode_logger.debug(f"IFFT padding zeros {number_of_zeros}")
 
     x_t_no_cp = irfft(half_spectrum, n=IFFT_LENGTH, axis=1, norm='ortho', workers=os.cpu_count()).astype(np.float32, copy=False)
     # Add cyclic prefix per symbol
@@ -209,6 +243,8 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
 
     STATE['num_points_symbol'] = x_t_groups.shape[1]
     STATE['cp_length'] = cyclic_prefix_length
+
+    # decode_logger.debug(f"CP {cyclic_prefix_length} | FFT {IFFT_LENGTH}")
 
     STATE['barker_code'] = barker_code
     # Flatten to create frame in time domain
@@ -225,7 +261,7 @@ def add_preamble_and_upsample(x_t_frame, preamble):
     preamble_max = np.max(preamble)
     x_t_frame = np.clip(x_t_frame, preamble_min, preamble_max)
     x_t_with_barker = np.concatenate([preamble, x_t_frame])
-    x_t_with_barker = power_preserving_resample(x_t_with_barker, up=SCALING_FACTOR, down=1)
+    # x_t_with_barker = power_preserving_resample(x_t_with_barker, up=SCALING_FACTOR, down=1)
     x_t_with_barker = x_t_with_barker[:AWG_MEMORY_LENGTH_MAX]  # truncate if needed
     return x_t_with_barker.reshape(1, -1).tolist()
 
@@ -270,6 +306,20 @@ def find_start(peak, voltages, preamble_length, ofdm_payload_length, search_wind
 
     return best_start, best_start - preamble_length, omega_hat, epsilon_hat
 
+
+def in_band_filter(xt, in_band_indices, nfft):
+    xt = torch.tensor(xt)
+    mask = torch.zeros(nfft)
+    neg_ks_indices = nfft - in_band_indices
+    mask[in_band_indices] = 1.0
+    mask[neg_ks_indices] = 1.0
+
+    impulse_response = torch.fft.ifftshift(torch.fft.ifft(mask).real)
+    h = impulse_response.view(1, 1, -1)
+    filtered_x = F.conv1d(xt.unsqueeze(1), h, padding='same').squeeze(1)
+    return filtered_x.numpy()
+
+
 STATE['peaks'] = []
 def demodulate_OFDM_one_symbol_frame(y_t:list,
                                      num_carriers: int,
@@ -301,18 +351,38 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
         plt.xlabel('Sample')
         plt.ylabel('Amplitude')
 
-    # Upsample the preamble
-    preamble = np.array(preamble_sequence)
-    voltages = y_t
-    time_OFDM_frame = 1 / freq_AWG
-    time_preamble = (len(preamble) / (MESSAGE_LENGTH)) * time_OFDM_frame
-    num_points_preamble = osc_sample_rate * time_preamble
-    num_points_frame = osc_sample_rate * time_OFDM_frame
-    preamble_sequence_upsampled = power_preserving_resample(preamble, up=int(num_points_preamble), down=len(preamble))
+    # # Upsample the preamble
+    # preamble = np.array(preamble_sequence)
+    # voltages = y_t
+    # time_OFDM_frame = 1 / freq_AWG
+    # time_preamble = (len(preamble) / (MESSAGE_LENGTH)) * time_OFDM_frame
+    # num_points_preamble = osc_sample_rate * time_preamble
+    # num_points_frame = osc_sample_rate * time_OFDM_frame
+    # preamble_sequence_upsampled = power_preserving_resample(preamble, up=int(num_points_preamble), down=len(preamble))
 
+    downsample_factor =  (freq_AWG * MESSAGE_LENGTH) / osc_sample_rate
+
+
+    frac = Fraction(downsample_factor).limit_denominator(10000)
+    up = frac.numerator
+    down = frac.denominator
+    # Downsample received waveform
+    preamble = np.array(preamble_sequence)
+
+    voltages = power_preserving_resample(y_t, up=up, down=down)
     # Correlation and peak detection
-    corr = signal.correlate(voltages, preamble_sequence_upsampled, mode='valid')
-    peaks, _ = find_peaks(corr, height=0.99*np.max(corr), distance=len(preamble_sequence_upsampled))
+    corr = signal.correlate(voltages, preamble, mode='valid')
+    peaks, _ = find_peaks(corr, height=0.95*np.max(np.abs(corr)), distance=len(preamble))
+
+    # Get actual frame length
+    if len(peaks) >= 2:
+        # This is the ACTUAL frame length from hardware
+        actual_frame_length = int(np.median(np.diff(peaks)))
+        # decode_logger.debug(f"Calculated Message Length {actual_frame_length} | Ideal {MESSAGE_LENGTH}")
+        # actual_frame_length = MESSAGE_LENGTH
+        actual_preamble_length = len(preamble)
+        actual_payload_length = actual_frame_length - actual_preamble_length
+    peak = peaks[0]
 
     if debug_plots:
         plt.subplot(322)
@@ -339,25 +409,24 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
                         bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.5),
                         arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0'))
 
-    # Parameters and frame extraction
-    preamble_length = len(preamble_sequence_upsampled)
-    ofdm_payload_length = int(num_points_frame - preamble_length)
+    # Parameters and frame extractio
 
-    peak = peaks[0]
+    # peak = peaks[0]
     # decode_logger.debug(f"Peak : {peak}")
-    best_start = peak + preamble_length
+    best_start = peak + actual_preamble_length
     # STATE['peaks'].append(best_peak)
     # if len(peaks) > 1:
     #     peaksnp = np.array(STATE['peaks'])
     #     decode_logger.debug(f"Peak Mean: {peaksnp.mean()} | Peaks std: {peaksnp.std()} | Latest Peak {peak} | Latest eps {best_eps} ")
-    frame_end = best_start + ofdm_payload_length
+    frame_end = best_start + actual_payload_length
     frame = voltages[best_start:frame_end]
 
     if debug_plots:
         frames = []
-        for peak in peaks:
-            frame_end = best_start + ofdm_payload_length
-            frame = voltages[best_start:frame_end]
+        for i, peak in enumerate(peaks):
+            start = peak + actual_preamble_length
+            frame_end = start + actual_payload_length
+            frame = voltages[start:frame_end]
             frames.append(frame)
         plt.subplot(324)
         plt.plot(frames[0])
@@ -419,8 +488,8 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
     symbols_arr = np.ascontiguousarray(np.stack(symbols_with_cp).astype(np.float32))  # [Nt, fft_len + CP_len]
     symbols_arr -= np.mean(symbols_arr, axis=-1, keepdims=True) # Remove DC Bias
     original_len = symbols_arr.shape[-1]
-    symbols_arr = power_preserving_resample(
-        symbols_arr, up=STATE['num_points_symbol'], down=original_len, axis=-1)
+    # symbols_arr = power_preserving_resample(
+    #     symbols_arr, up=STATE['num_points_symbol'], down=original_len, axis=-1)
     
     # decode_logger.debug(f"Donsample: input {original_len} | output {STATE['num_points_symbol']}")
 
@@ -443,7 +512,11 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
                 STATE['time_decoder_out'] = symbols_arr
                 STATE['time_decoder_in'] = STATE['time_decoder_out']
     
-    
+    # perform in band filters
+    if STATE['in_band_filter']:
+        symbols_arr = in_band_filter(symbols_arr, STATE['ks'], STATE['IFFT_LENGTH'])
+
+
     # Remove cyclic prefix
     symbols_arr = symbols_arr[:, int(CP_RATIO * symbols_arr.shape[1]):]
 
@@ -583,14 +656,15 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
 
 def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,  mode: str) -> list:
     # Instead of grabbing from labview, directly take from decoder
-    if 'decoder_out' in STATE:
-        symbols = STATE['decoder_out']
-    else:
-        symbols = torch.tensor(real_symbols) + 1j * torch.tensor(imag_symbols)
 
+    # symbols = torch.tensor(real_symbols) + 1j * torch.tensor(imag_symbols)
 
-    # Grab constellation object
+    symbols = STATE['last_received']
+    
+    # # Grab constellation object
     constellation = get_constellation(mode)
+    # true_bits_array = np.array(list(constellation.symbols_to_bits(STATE['last_sent'])))
+
 
     # Demap symbols to bits
     constellation_symbols = torch.tensor(
@@ -621,6 +695,8 @@ def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,
 
     # Calculate BER
     BER = float(np.sum(true_bits_array != decided_bits_flat_array) / len(true_bits_array))
+    evm = torch.mean(torch.square(torch.abs(STATE['last_sent'] - STATE['last_received'])))
+    # print("evm shapes:", STATE['last_sent'].shape, STATE['last_received'].shape)
 
     # Log frame BER
     STATE['frame_BER'] = BER
@@ -637,15 +713,19 @@ def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,
 
     elif STATE['time_model'] and STATE['validate_model']:
         cancel_run_early = False
+        if STATE['run_model']:
+            wandb.log({"freq model evm loss": evm})
+        else:
+             wandb.log({"freq no model evm loss": evm})
         make_time_validate_plots(STATE['time_encoder_in'], STATE['time_encoder_out'],
                                  STATE['time_decoder_in'], STATE['time_decoder_out'], 
                                  STATE['frame_BER'], STATE['run_model'], STATE['frequencies'])
+
     else:
         cancel_run_early = False
 
     SNR, PowerFactor = float(0), float(0)
 
-    evm = torch.mean(torch.square(torch.abs(STATE['last_sent'] - STATE['last_received'])))
     
     return decided_bits_flat, float(BER), evm, PowerFactor, cancel_run_early
 
@@ -754,7 +834,7 @@ def make_time_validate_plots(encoder_in, encoder_out, decoder_in, decoder_out, f
     min_len = min(len(encoder_in.flatten()), len(decoder_out.flatten()))
     mse_total = np.mean((encoder_in.flatten()[:min_len] - decoder_out.flatten()[:min_len]) ** 2)
     prefix = "validate/time_model_" if run_model else "validate/time_no_model_"
-    wandb.log({f"{prefix}evm_loss": mse_total})
+    wandb.log({f"{prefix}mse_loss": mse_total})
     wandb.log({f"{prefix}frame_BER": frame_BER})
     fig, axes = plt.subplots(3, 1, figsize=(12, 16))
     zoom_samples = 200

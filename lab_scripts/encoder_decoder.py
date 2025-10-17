@@ -27,7 +27,7 @@ import torch.nn.functional as F
 from scipy.signal import resample_poly
 script_dir = os.path.dirname(os.path.abspath(__file__))
 from lab_scripts.logging_code import *
-decode_logger = setup_logger(log_file=r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\test2.txt")
+decode_logger = setup_logger(log_file=r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\test3.txt")
 
 def get_constellation(mode: str):
         if mode == "qpsk":
@@ -41,15 +41,15 @@ def get_constellation(mode: str):
         return constellation
 
 STATE['train_model'] = False # Variable
-STATE['validate_model'] = True # Variable
+STATE['validate_model'] = False # Variable
 STATE['train_channel'] = False # Variable
-STATE['time_model'] = True
+STATE['time_model'] = False
 STATE['normalize_power'] = False
 
-load_model = True # Variable
+load_model = False # Variable
 LOAD_DIR = ""
 if load_model:
-    model_name = "fallen-sun-4139" # Variable
+    model_name = "absurd-dream-4990" # Variable
     base_dir = r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\models\pickled_models"
     LOAD_DIR = os.path.join(base_dir, model_name)
     with open(os.path.join(LOAD_DIR, "config.json"), "r") as f:
@@ -294,24 +294,9 @@ class TCNBlock(nn.Module):
             x = self.resample(x)
         return out + x  # residual connection
 
-class LearnableFrequencyNoise(nn.Module):
-    def __init__(self, sequence_length: int):
-        super().__init__()
-        num_freq_bins = sequence_length // 2 + 1
-        self.noise_psd = nn.Parameter(torch.zeros(num_freq_bins))
-
-    def forward(self, x):
-        batch_size, seq_len = x.shape
-        noise_power = F.softplus(self.noise_psd)
-        noise_amplitude = torch.sqrt(noise_power)
-        noise_amplitude_batch = noise_amplitude.unsqueeze(0).expand(batch_size, -1)
-        random_phase = torch.exp(1j * 2 * torch.pi * torch.rand_like(noise_amplitude_batch))
-        noise_fft = noise_amplitude_batch * random_phase
-        time_domain_noise = torch.fft.irfft(noise_fft, n=seq_len)
-        return time_domain_noise
 
 class TCN(nn.Module):
-    def __init__(self, sequence_length, nlayers=3, dilation_base=2, num_taps=10, hidden_channels=32, use_noise=False):
+    def __init__(self, nlayers=3, dilation_base=2, num_taps=10, hidden_channels=32):
         super().__init__()
         layers = []
         in_channels = 1
@@ -323,19 +308,44 @@ class TCN(nn.Module):
             in_channels = hidden_channels
         self.tcn = nn.Sequential(*layers)
         self.readout = nn.Conv1d(hidden_channels, 1, kernel_size=1)
-        if use_noise:
-            self.noise_generator = LearnableFrequencyNoise(sequence_length)
-        else:
-            self.noise_generator = None
 
     def forward(self, xin):
         x = xin.unsqueeze(1)    # [B,1,T]
         out = self.tcn(x)     # [B,H,T]
         out = self.readout(out).squeeze(1)
         out = out - out.mean(dim=1, keepdim=True)  # [B,T]
-        if self.noise_generator is not None:
-            out = out + self.noise_generator(xin) # Add frequency noise
         return out
+
+class TCN_channel(nn.Module):
+    def __init__(self, nlayers=3, dilation_base=2, num_taps=10, hidden_channels=32, learn_noise=False):
+        super().__init__()
+        layers = []
+        in_channels = 1
+        for i in range(nlayers):
+            dilation = dilation_base ** i
+            layers.append(
+                TCNBlock(in_channels, hidden_channels, num_taps, dilation)
+            )
+            in_channels = hidden_channels
+        self.learn_noise = learn_noise
+        self.tcn = nn.Sequential(*layers)
+        self.readout = nn.Conv1d(hidden_channels, 2, kernel_size=1) # 2 channels mean | std
+
+    def forward(self, xin):
+        x = xin.unsqueeze(1)    # [B,1,T]
+        out = self.tcn(x)     # [B,H,T]
+        out = self.readout(out) # [B, 2, T] mean | std
+        mean_out = out[:, 0, :]
+        log_std_out = out[:, 1, :]
+
+        std_out = torch.exp(log_std_out)
+        epsilon = torch.randn_like(std_out) # Sample from N(0, 1)
+        mean_out = mean_out - mean_out.mean(dim=1, keepdim=True)  # [B ,T]
+        if self.learn_noise:
+            out = mean_out + epsilon * std_out
+            return out, mean_out, epsilon * std_out
+        else:
+            return mean_out
 
 def evm_loss(true_symbols, predicted_symbols):
         return torch.mean((true_symbols.real - predicted_symbols.real) ** 2 + (true_symbols.imag - predicted_symbols.imag) ** 2)
@@ -345,23 +355,19 @@ if load_model:
         remote_config = json.load(f)
     if  STATE['time_model']:
         encoder = TCN(
-            sequence_length=remote_config['num_points_symbol'],
             nlayers=remote_config['nlayers'],
             dilation_base=remote_config['dilation_base'],
             num_taps=remote_config['num_taps'],
-            hidden_channels=remote_config['hidden_channels'],
-            use_noise=remote_config['use_noise']
+            hidden_channels=remote_config['hidden_channels']
         )
         encoder.load_state_dict(torch.load(os.path.join(LOAD_DIR, "encoder_weights.pth")))
         encoder.eval()
 
         decoder = TCN(
-            sequence_length=remote_config['num_points_symbol'],
             nlayers=remote_config['nlayers'],
             dilation_base=remote_config['dilation_base'],
             num_taps=remote_config['num_taps'],
             hidden_channels=remote_config['hidden_channels'],
-            use_noise=remote_config['use_noise']
         )
         decoder.load_state_dict(torch.load(os.path.join(LOAD_DIR, "decoder_weights.pth")))
         decoder.eval()
@@ -479,7 +485,7 @@ def characterize_channel_Tx(real, imag, f_low, f_high, subcarrier_spacing):
     bits = "".join(bit_strings)
     out = torch.tensor(constellation.bits_to_symbols(bits)).reshape(Nt, Nf)
     out = add_noise(out, SNRS[STATE['snr_idx']])
-    STATE['last_sent_channel'] = out
+    STATE['last_sent'] = out
     num_zeros = STATE['num_zeros']
     zeros = torch.zeros((out.shape[0], num_zeros), dtype=out.dtype, device=out.device)
     out_full = torch.cat([zeros, out], dim=1)
@@ -490,16 +496,42 @@ def characterize_channel_Ry(real, imag):
     imag = torch.tensor(imag, dtype=torch.float32, device=device).reshape(STATE['Nt'], STATE['Nf'])
     out = real + 1j * imag
     # Save to h5 file
-    append_symbol_frame(STATE['last_sent_channel'],
+    append_symbol_frame(STATE['last_sent'],
                         STATE['last_freq_symbol_received'],
                         STATE['last_time_symbol_received'],
                         STATE['frequencies'],
                         metadata={"snr_idx": STATE['snr_idx']},
-                        h5_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\characterize_channel_V.h5")
+                        h5_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\characterize_channel_3.5V.h5")
     STATE['snr_idx'] +=1
     STATE['snr_idx'] %= SNRS.size(0)
     out = out.flatten() # Must flatten along batch dimension to output from labview
     return out.real.detach().cpu().contiguous().numpy().tolist(), out.imag.detach().cpu().contiguous().numpy().tolist()
+
+
+def in_band_filter(xt, in_band_indices, nfft):
+    """
+    xt: [B, T] or [T] real input tensor
+    in_band_indices: tensor of indices to keep (e.g. subcarriers)
+    nfft: FFT size (filter length)
+    """
+    if not torch.is_tensor(xt):
+        xt = torch.tensor(xt, dtype=torch.float32)
+    if xt.ndim == 1:
+        xt = xt.unsqueeze(0)  # -> [1, T]
+
+    device = xt.device
+
+    mask = torch.zeros(nfft, device=device)
+    neg_ks_indices = nfft - in_band_indices
+    mask[in_band_indices] = 1.0
+    mask[neg_ks_indices] = 1.0
+
+    impulse_response = torch.fft.ifftshift(torch.fft.ifft(mask).real)
+    h = impulse_response.view(1, 1, -1)  # [out_ch=1, in_ch=1, kernel_len]
+
+    # apply same filter to all batch items
+    filtered_x = F.conv1d(xt.unsqueeze(1), h, padding='same').squeeze(1)
+    return filtered_x
 
 def validate_time_encoder(x_t):
     assert STATE["time_model"] == True
@@ -511,6 +543,8 @@ def validate_time_encoder(x_t):
             x_t = STATE["encoder"](x_t)
             # decode_logger.debug(f"Encoder out {x_t.shape}")
             STATE['time_encoder_out'] = x_t.detach().cpu().numpy()
+            # x_t = in_band_filter(x_t, STATE['ks'], STATE['IFFT_LENGTH'])
+            x_t = np.clip(x_t.real, a_min=-3.0, a_max=3.0)
         return x_t.real.detach().cpu().numpy().tolist()
     else:
         STATE['time_encoder_in'] = np.array(x_t)
@@ -694,7 +728,7 @@ def test_channel_ici_TX(real, imag, f_low, f_high, subcarrier_spacing):
     # out = real_part + 1j * imag_part
     if STATE['normalize_power']:
         out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
-    STATE['last_sent_channel'] = out
+    STATE['last_sent'] = out
     # Attach back the zeros.
     num_zeros = STATE['num_zeros']
     zeros = torch.zeros((out.shape[0], num_zeros), dtype=out.dtype, device=out.device)
@@ -746,7 +780,7 @@ def test_channel_ici_RY(real, imag):
     print(curr_carrier)
     print(f"Total energy not at index {curr_carrier_idx}: {total_energy: .3f} | Energy at carrier {energy_at_carrier}")
     print(f"Relative ICI {relative_ICI}")
-    print(f"Sent Carrier {STATE['last_sent_channel'][0, curr_carrier_idx].item()} | received {curr_carrier[0].item()}")
+    print(f"Sent Carrier {STATE['last_sent'][0, curr_carrier_idx].item()} | received {curr_carrier[0].item()}")
     STATE['carrier_counter'] += 1
     out = out.flatten()
     return out.real.detach().cpu().contiguous().numpy().tolist(), out.imag.detach().cpu().contiguous().numpy().tolist()
@@ -763,7 +797,7 @@ def solve_channel_noise_TX(real, imag, f_low, f_high, subcarrier_spacing):
     # Save prediction for loss calculation
     if STATE['normalize_power']:
         out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
-    STATE['last_sent_channel'] = out
+    STATE['last_sent'] = out
     # Attach back the zeros.
     zeros = torch.zeros((out.shape[0], STATE['num_zeros']), dtype=out.dtype, device=out.device)
     out_full = torch.cat([zeros, out], dim=1)
@@ -775,8 +809,12 @@ def solve_channel_noise_RY(real, imag):
     out = real + 1j * imag
     STATE['decoder_in'] = out
     # Update local dataset
-    # append_to_npz(r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_inputs_outputs.npz", STATE["last_sent_channel"], out)
-    append_symbol_frame(STATE['last_sent_channel'], STATE['last_freq_symbol_received'], freqs=STATE['frequencies'],noise_sample_indexing=False, received_time=STATE['last_time_symbol_received'],
+    # append_to_npz(r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_inputs_outputs.npz", STATE["last_sent"], out)
+    append_symbol_frame(STATE['last_sent'],
+                        STATE['last_freq_symbol_received'],
+                        freqs=STATE['frequencies'],
+                        noise_sample_indexing=False,
+                        received_time=STATE['last_time_symbol_received'],
                         h5_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\wideband_3.1V.h5")
     print(f"Appended new symbol, distinct symbol #{NOISY_STATE['distinct_symbol']}")
     STATE['decoder_out'] = out
@@ -790,19 +828,20 @@ def train_channel_model_TX(real, imag, f_low, f_high, subcarrier_spacing):
     Nf = STATE['Nf']
 
 
-    generator = torch.Generator()
-    generator.manual_seed(42)
+    # generator = torch.Generator()
+    # generator.manual_seed(42)
 
     # Grab constellation and add small complex noise
     jitter_power = 1e-1
     jitter = np.sqrt(jitter_power/2)*(torch.randn(Nt, Nf) + 1j * torch.randn(Nt, Nf))
     # Grab constellation object
     constellation = get_constellation(mode="m7_apsk_constellation")
-    bits = torch.randint(0, 2, size=(constellation.modulation_order * Nf * Nt, ), generator=generator).numpy()
+    # bits = torch.randint(0, 2, size=(constellation.modulation_order * Nf * Nt, ), generator=generator).numpy()
+    bits = torch.randint(0, 2, size=(constellation.modulation_order * Nf * Nt, )).numpy()
     bit_strings = [str(x) for x in bits]
     bits = "".join(bit_strings)
     out = torch.tensor(constellation.bits_to_symbols(bits)).reshape(Nt, Nf)
-    # out += jitter
+    out += jitter
     if STATE['normalize_power']:
         out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
 
@@ -812,7 +851,7 @@ def train_channel_model_TX(real, imag, f_low, f_high, subcarrier_spacing):
     if 'channel_model' in STATE and STATE['train_model']:
         STATE['channel_prediction'] = STATE['channel_model'](out, STATE['frequencies'])
         STATE['encoder_out'] = STATE['channel_prediction']
-    STATE['last_sent_channel'] = out
+    STATE['last_sent'] = out
     # Attach back the zeros.
     zeros = torch.zeros((out.shape[0], STATE['num_zeros']), dtype=out.dtype, device=out.device)
     out_full = torch.cat([zeros, out], dim=1)
@@ -829,8 +868,8 @@ def train_channel_model_RY(real, imag):
     if 'channel_prediction' in STATE:
         predicted_symbols = STATE['channel_prediction']
         loss = evm_loss(predicted_symbols, out)
-    append_symbol_frame(STATE['last_sent_channel'], STATE['last_freq_symbol_received'], STATE['last_time_symbol_received'], STATE['frequencies'],
-                        h5_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\single_X_3.5V.h5")
+    append_symbol_frame(STATE['last_sent'], STATE['last_freq_symbol_received'], STATE['last_time_symbol_received'], STATE['frequencies'],
+                        h5_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\unnormalized_wide_channel_3.5V.h5")
     STATE['cycle_count'] += 1
     if loss is not None:
         STATE['loss_accumulator'].append(loss)
