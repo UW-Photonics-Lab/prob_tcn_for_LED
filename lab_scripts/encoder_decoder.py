@@ -4,6 +4,8 @@ from noisy_state import NOISY_STATE
 # from lab_scripts.training_state import STATE
 # from lab_scripts.noisy_state import NOISY_STATE
 import h5py
+import zarr
+import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -49,7 +51,7 @@ STATE['normalize_power'] = False
 load_model = False # Variable
 LOAD_DIR = ""
 if load_model:
-    model_name = "absurd-dream-4990" # Variable
+    model_name = "fresh-universe-5572" # Variable
     base_dir = r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\models\pickled_models"
     LOAD_DIR = os.path.join(base_dir, model_name)
     with open(os.path.join(LOAD_DIR, "config.json"), "r") as f:
@@ -571,9 +573,9 @@ def validate_time_encoder(x_t):
             STATE['time_encoder_in'] = x_t.detach().cpu().numpy()
             x_t = STATE["encoder"](x_t)
             # decode_logger.debug(f"Encoder out {x_t.shape}")
-            STATE['time_encoder_out'] = x_t.detach().cpu().numpy()
             # x_t = in_band_filter(x_t, STATE['ks'], STATE['IFFT_LENGTH'])
             x_t = np.clip(x_t.real, a_min=-3.0, a_max=3.0)
+            STATE['time_encoder_out'] = x_t.detach().cpu().numpy()
         return x_t.real.detach().cpu().numpy().tolist()
     else:
         STATE['time_encoder_in'] = np.array(x_t)
@@ -897,8 +899,9 @@ def train_channel_model_RY(real, imag):
     if 'channel_prediction' in STATE:
         predicted_symbols = STATE['channel_prediction']
         loss = evm_loss(predicted_symbols, out)
-    append_symbol_frame(STATE['last_sent'], STATE['last_freq_symbol_received'], STATE['last_time_symbol_received'], STATE['frequencies'],
-                        h5_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\unnormalized_wide_channel_3.5V.h5")
+    append_symbol_frame(STATE['last_sent'],
+                        STATE['last_freq_symbol_received'], STATE['last_time_symbol_received'], STATE['frequencies'],
+                        zarr_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\wide_channel_25MHz_3.5V_scale2.zarr")
     STATE['cycle_count'] += 1
     if loss is not None:
         STATE['loss_accumulator'].append(loss)
@@ -976,7 +979,7 @@ def train_channel_model_RY(real, imag):
 def debug_pipeline_Tx(real, imag, f_low, f_high, subcarrier_spacing):
     Nf, Nt = STATE['Nf'], STATE['Nt']
     out =  torch.zeros(Nt, Nf, dtype=torch.complex64)
-    out[:, 100] = 10
+    out[:, 300] = 10
 
     zeros = torch.zeros((out.shape[0], STATE['num_zeros']), dtype=out.dtype, device=out.device)
     out_full = torch.cat([zeros, out], dim=1)
@@ -1118,7 +1121,6 @@ def normal(step):
     return 0
 
 class StableLoss(nn.Module):
-
     def __init__(self, schedule_fn):
         super().__init__()
         self.schedule_fn = schedule_fn
@@ -1749,7 +1751,7 @@ def plot_received_vs_predicted(received_symbols: torch.Tensor,
 
 def append_symbol_frame(
     sent, received, received_time, freqs,
-    h5_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\singleton_data.h5",
+    zarr_path= r"example.zarr",
     metadata: dict = None,
     noise_sample_indexing = False
 ):
@@ -1764,7 +1766,6 @@ def append_symbol_frame(
         metadata (dict): optional dictionary of scalar metadata (e.g., {'snr': 32.1})
         noise_sample_indexing: boolean for whether we're measuring noise or not
     """
-
     # Convert to numpy
     def to_numpy(x):
         return x.detach().cpu().numpy() if isinstance(x, torch.Tensor) else x
@@ -1772,42 +1773,29 @@ def append_symbol_frame(
     sent = to_numpy(sent).astype(np.complex64)
     received = to_numpy(received).astype(np.complex64)
     freqs = to_numpy(freqs).astype(np.float32)
+    # attempt to open file until 5 seconds have passed
+    try:
+        f = zarr.open(zarr_path, mode='a')
 
-    # Ensure parent directory exists
-    os.makedirs(os.path.dirname(h5_path), exist_ok=True)
-
-    # Open and append
-    with h5py.File(h5_path, "a") as f:
-        # Init frame_counter if missing
-        if "frame_counter" not in f.attrs:
-            f.attrs["frame_counter"] = 1
-
-        frame_id = int(f.attrs["frame_counter"])
-        if not noise_sample_indexing:
-            group_name = f"frame_{frame_id:06d}"
-            grp = f.create_group(group_name)
-        else:
-            modified_symbol_num = str(NOISY_STATE['distinct_symbol'])
-            modified_iter_inum = str(NOISY_STATE['symbol_iteration'])
-            for zero in range(6-len(modified_symbol_num)): #Arbitrarily chosen because unlikely to draw >999999 samples
-                modified_symbol_num = "0" + modified_symbol_num
-            for zero_ in range(int(np.log10(NOISY_SAMPLE_SIZE))+1-len(modified_iter_inum)):
-                modified_iter_inum = "0" + modified_iter_inum
-            group_name = f"symbol_{modified_symbol_num}_iteration_{modified_iter_inum}"
-            grp = f.create_group(group_name)
-
-        # Store datasets
-        grp.create_dataset("sent", data=sent, compression="gzip")
-        grp.create_dataset("received", data=received, compression="gzip")
-
+        time_stamp = int(time.time())
+        group_name = f"frame_{time_stamp}"
+        grp = f.create_group(group_name, overwrite=False)
+        grp.create_array("sent", sent, compressor="default", chunks=True)
+        grp.create_array("received", received, compressor="default", chunks=True)
+        grp.create_array("freqs", freqs, compressor="default", chunks=True)
+        
         if received_time is not None:
             cp_length = STATE['cp_length']
             num_points_symbol = STATE['num_points_symbol']
-            grp.create_dataset("num_points_symbol", data=num_points_symbol)
-            grp.create_dataset("cp_length", data=cp_length)
-            grp.create_dataset("received_time", data=received_time, compression="gzip")
-        grp.create_dataset("freqs", data=freqs)
-
+            grp.attrs["num_points_symbol"] = num_points_symbol
+            grp.attrs["cp_length"] = cp_length
+            grp.create_array(
+                "received_time",
+                received_time.astype(np.float32),
+                compressor="default",
+                chunks=True         
+            )
+       
         # Store metadata if provided
         if metadata:
             for key, value in metadata.items():
@@ -1816,7 +1804,8 @@ def append_symbol_frame(
                 except Exception as e:
                     print(f"Could not save metadata key '{key}': {e}")
 
-        # Increment counter
-        f.attrs["frame_counter"] = frame_id + 1
+    except Exception as e:
+        decode_logger.warning(f"[append skipped] Error {e}")
+        return None
 
-    return frame_id
+    return time_stamp
