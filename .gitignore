@@ -11,3 +11,4 @@ experiments/*
 wandb*
 saved_models/*
 *.yml
+!notebooks/*.ipynb
