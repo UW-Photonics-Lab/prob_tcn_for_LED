@@ -8,27 +8,26 @@ from encoder_decoder import update_weights
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
-from scipy.signal import resample_poly
+from scipy.signal import resample_poly, resample
 from scipy import signal
 from scipy.signal import find_peaks
 import os
 import wandb
 from training_state import STATE
 import torch
+import torch.nn.functional as F
 import matplotlib.cm as cm
 import matplotlib.colors as colors
 from scipy.fft import irfft, rfft
 from fractions import Fraction
-from scipy.signal import hilbert
+from scipy.signal import hilbert, filtfilt, butter
 
 # Get logging
 from lab_scripts.logging_code import *
 STATE['normalize_power'] = False
 STATE['verify_synchronization'] = False
-decode_logger = setup_logger(log_file=r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\test.txt")
-STATE['sent_symbols'] = []
-STATE['received_symbols'] = []
-STATE['channel_estimates'] = []
+STATE['in_band_filter'] = False
+decode_logger = setup_logger(log_file=r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\test3.txt")
 STATE["frame_BER_accumulator"] = [] # Use to estimate BER over many frames
 STATE['frame_evm_accumulator'] = []
 def get_constellation(mode: str):
@@ -42,13 +41,13 @@ def get_constellation(mode: str):
             constellation = RingShapedConstellation(filename=r'C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\lab_scripts\saved_constellations\m7_apsk_constellation.npy')
         return constellation
 
-def power_preserving_resample(signal, **kwargs):
-    rms_before = np.sqrt(np.mean(np.square(signal)))
-    resampled_signal = resample_poly(signal, **kwargs)
-    rms_after = np.sqrt(np.mean(np.square(resampled_signal)))
-    scaling_factor = rms_before / rms_after
-    corrected_signal = resampled_signal * scaling_factor
-    return corrected_signal
+# def resample_poly(signal, **kwargs):
+#     rms_before = np.sqrt(np.mean(np.square(signal)))
+#     resampled_signal = resample_poly(signal, **kwargs)
+#     rms_after = np.sqrt(np.mean(np.square(resampled_signal)))
+#     scaling_factor = rms_before / rms_after
+#     corrected_signal = resampled_signal * scaling_factor
+#     return corrected_signal
 
 def modulate_data_OFDM(mode: str, 
                        num_carriers: int, 
@@ -86,6 +85,7 @@ def modulate_data_OFDM(mode: str,
 
     STATE['Nt'] = num_symbols_per_frame
     STATE['Nf'] = N_data
+    STATE['delta_f'] = subcarrier_delta_f
     STATE['frequencies'] = np.arange(f_min, f_max, subcarrier_delta_f)
     STATE['ks'] = (STATE['frequencies'] / subcarrier_delta_f).astype(int)
     
@@ -131,11 +131,10 @@ def modulate_data_OFDM(mode: str,
 
 
 AWG_MEMORY_LENGTH_MAX = 16384
-SCALING_FACTOR = 8
+SCALING_FACTOR = 2
 MESSAGE_LENGTH = 16384 // SCALING_FACTOR
-BARKER_RATIO = 0.01
-BARKER_LENGTH = int(BARKER_RATIO * (MESSAGE_LENGTH)) if int(BARKER_RATIO * (MESSAGE_LENGTH)) > 5 else 5
-CP_RATIO = 0.25
+BARKER_LENGTH = 384 / SCALING_FACTOR
+CP_RATIO = 0.25 # Need Message length - barker cleanly divisible by 4
 
 def symbols_to_time(X, upsampling_factor: int, num_leading_zeros):
     # Make Hermitian symmetric11
@@ -152,6 +151,39 @@ def symbols_to_time(X, upsampling_factor: int, num_leading_zeros):
     # Convert to time domain
     x_time = np.fft.ifft(X_full, axis=-1, norm="ortho").real
     return x_time
+
+
+def generate_zadoff_chu(length, root=1):
+    """Generate Zadoff-Chu sequence"""
+    num_pad = 6
+    n = np.arange(length - 2 * num_pad)
+    if length % 2 == 0:
+        zc = np.exp(-1j * np.pi * root * n * (n + 1) / length)
+    else:
+        zc = np.exp(-1j * np.pi * root * n**2 / length)
+
+    # add 5 zeros on either side
+    padding_zeros = np.zeros(num_pad, dtype=np.complex128)
+    zc = np.concatenate([padding_zeros, zc, padding_zeros])
+    return zc
+
+def nearest_prime(n):
+    """Find nearest prime number"""
+    def is_prime(num):
+        if num < 2:
+            return False
+        for i in range(2, int(np.sqrt(num)) + 1):
+            if num % i == 0:
+                return False
+        return True
+    
+    for offset in range(n):
+        if is_prime(n + offset):
+            return n + offset
+        if n - offset > 0 and is_prime(n - offset):
+            return n - offset
+    return n
+
 
 def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: list[list[float]]) -> list[float]:
     '''Takes a symbol frame matrix and converts and x(t) frame matrix
@@ -175,13 +207,17 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
     data_lo = STATE['num_zeros']       # index inside symbol_groups (no DC bin in this array)
     data_hi = data_lo + STATE['Nf']
     STATE['last_sent'] = torch.tensor(symbol_groups[:, data_lo:data_hi])
-    STATE['sent_symbols'].append(STATE['last_sent'])
     N_t = symbol_groups.shape[0]
-    barker_code = 3 *  np.array([1, -1, 1, -1, 1,-1, 1, -1, 1], dtype=float)
-    barker_code = np.repeat(barker_code, BARKER_LENGTH // len(barker_code)) # Set as 1%
+    # barker_code = 3 *  np.array([0, 0, 0, 1, -1, 1, -1, 1,-1, 1, -1, 1, 0, 0, 0], dtype=float)
+    # barker_code = np.repeat(barker_code, BARKER_LENGTH // len(barker_code)) # Set as 1%
+
+    zc_sequence = generate_zadoff_chu(BARKER_LENGTH, root=1)
+    barker_code = np.real(zc_sequence) 
+    barker_code /= np.max(np.abs(barker_code))
+    barker_code = np.ascontiguousarray(3 * barker_code)
   
     SYMBOL_LENGTH = (MESSAGE_LENGTH - len(barker_code)) // N_t
-    IFFT_LENGTH = int(SYMBOL_LENGTH * (1 - CP_RATIO))
+    IFFT_LENGTH = round(SYMBOL_LENGTH * (1 - CP_RATIO))
     IFFT_LENGTH -= IFFT_LENGTH % 2 # Force to be even
     STATE['IFFT_LENGTH'] = IFFT_LENGTH
 
@@ -194,8 +230,9 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
     half_spectrum = np.hstack((DC_nyquist, symbol_groups, DC_nyquist))
     assert half_spectrum.shape[1] == (IFFT_LENGTH // 2 + 1), "Half-spectrum length mismatch."
 
-    cyclic_prefix_length = int(SYMBOL_LENGTH * CP_RATIO)
-    decode_logger.debug(f"IFFT padding zeros {number_of_zeros}")
+    cyclic_prefix_length = round(SYMBOL_LENGTH * CP_RATIO)
+    # decode_logger.debug(f"IFFT padding zeros {number_of_zeros}")
+ 
 
     x_t_no_cp = irfft(half_spectrum, n=IFFT_LENGTH, axis=1, norm='ortho', workers=os.cpu_count()).astype(np.float32, copy=False)
     # Add cyclic prefix per symbol
@@ -210,6 +247,8 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
     STATE['num_points_symbol'] = x_t_groups.shape[1]
     STATE['cp_length'] = cyclic_prefix_length
 
+    # decode_logger.debug(f"CP {cyclic_prefix_length} | FFT {IFFT_LENGTH}")
+
     STATE['barker_code'] = barker_code
     # Flatten to create frame in time domain
     x_t_frame = x_t_groups.flatten()
@@ -223,9 +262,28 @@ def add_preamble_and_upsample(x_t_frame, preamble):
     preamble = np.array(preamble).flatten()
     preamble_min = np.min(preamble)
     preamble_max = np.max(preamble)
+    # decode_logger.debug(f"Preamble heights {preamble_min} | {preamble_max}")
     x_t_frame = np.clip(x_t_frame, preamble_min, preamble_max)
     x_t_with_barker = np.concatenate([preamble, x_t_frame])
-    x_t_with_barker = power_preserving_resample(x_t_with_barker, up=SCALING_FACTOR, down=1)
+
+    if False:
+        preamble_fft = np.fft.fft(preamble)
+        freqs_before = np.fft.fftfreq(len(preamble), 1/(STATE['IFFT_LENGTH'] * STATE['delta_f']))
+        upsampled_preamble = resample_poly(preamble, up=SCALING_FACTOR, down=1, )
+        # After upsampling
+        upsampled_fft = np.fft.fft(upsampled_preamble)
+        freqs_after = np.fft.fftfreq(len(upsampled_preamble), 1/(STATE['delta_f'] * STATE['IFFT_LENGTH']*SCALING_FACTOR))
+
+        plt.subplot(211)
+        plt.plot(freqs_before[:len(freqs_before)//2], np.abs(preamble_fft[:len(preamble_fft)//2]))
+        plt.title('Preamble Spectrum Before Upsampling')
+
+        plt.subplot(212)
+        plt.plot(freqs_after[:len(freqs_after)//2], np.abs(upsampled_fft[:len(upsampled_fft)//2]))
+        plt.title('Preamble Spectrum After Upsampling')
+        plt.show()
+
+    x_t_with_barker = resample_poly(x_t_with_barker, up=SCALING_FACTOR, down=1)
     x_t_with_barker = x_t_with_barker[:AWG_MEMORY_LENGTH_MAX]  # truncate if needed
     return x_t_with_barker.reshape(1, -1).tolist()
 
@@ -270,6 +328,20 @@ def find_start(peak, voltages, preamble_length, ofdm_payload_length, search_wind
 
     return best_start, best_start - preamble_length, omega_hat, epsilon_hat
 
+
+def in_band_filter(xt, in_band_indices, nfft):
+    xt = torch.tensor(xt)
+    mask = torch.zeros(nfft)
+    neg_ks_indices = nfft - in_band_indices
+    mask[in_band_indices] = 1.0
+    mask[neg_ks_indices] = 1.0
+
+    impulse_response = torch.fft.ifftshift(torch.fft.ifft(mask).real)
+    h = impulse_response.view(1, 1, -1)
+    filtered_x = F.conv1d(xt.unsqueeze(1), h, padding='same').squeeze(1)
+    return filtered_x.numpy()
+
+
 STATE['peaks'] = []
 def demodulate_OFDM_one_symbol_frame(y_t:list,
                                      num_carriers: int,
@@ -301,78 +373,130 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
         plt.xlabel('Sample')
         plt.ylabel('Amplitude')
 
-    # Upsample the preamble
+    baseband_sample_rate = (freq_AWG * (MESSAGE_LENGTH)) 
+    baseband_nyquist_rate = baseband_sample_rate / 2
+    downsample_factor = baseband_sample_rate / osc_sample_rate
+    frac = Fraction(downsample_factor).limit_denominator(10000)
+    up = frac.numerator
+    down = frac.denominator
+    # Downsample received waveformdecd
+    # decode_logger.debug(f"Downsample factor {downsample_factor}")
+    y_t = resample_poly(y_t, up=up, down=down)
     preamble = np.array(preamble_sequence)
-    voltages = y_t
-    time_OFDM_frame = 1 / freq_AWG
-    time_preamble = (len(preamble) / (MESSAGE_LENGTH)) * time_OFDM_frame
-    num_points_preamble = osc_sample_rate * time_preamble
-    num_points_frame = osc_sample_rate * time_OFDM_frame
-    preamble_sequence_upsampled = power_preserving_resample(preamble, up=int(num_points_preamble), down=len(preamble))
 
-    # Correlation and peak detection
-    corr = signal.correlate(voltages, preamble_sequence_upsampled, mode='valid')
-    peaks, _ = find_peaks(corr, height=0.99*np.max(corr), distance=len(preamble_sequence_upsampled))
+    DEBUG_ALIASING = False
+
+
+    # Filter out high frequency content from preamble to avoid rollover
+    # b, a = butter(N=16, Wn=cutoff, btype='low', fs=osc_sample_rate)
+    # y_t_filtered = filtfilt(b, a, y_t)
+
+    if DEBUG_ALIASING:
+        # plot current received spectrum
+        Yk = np.abs(np.fft.fft(y_t, norm='ortho'))
+        freqs = np.fft.fftfreq(len(y_t), 1/osc_sample_rate)
+        freq_mask = (freqs <= 2 * baseband_nyquist_rate) & (freqs > 0)
+        plt.figure(figsize=(16, 8))
+        half = len(y_t)//2
+        plt.plot(freqs[freq_mask], Yk[freq_mask])
+        plt.title("Spectrum of Received Signal")
+        plt.xlabel("Freq")
+        plt.ylabel("|Y|")
+        plt.grid(True)
+        plt.show()
+
+
+    y_t_filtered = y_t
+    if DEBUG_ALIASING:
+        Yk = np.abs(np.fft.fft(y_t_filtered, norm='ortho'))
+        freqs = np.fft.fftfreq(len(y_t), 1/osc_sample_rate)
+        freq_mask = (freqs <= 2 * baseband_nyquist_rate) & (freqs > 0)
+        plt.figure(figsize=(16, 8))
+        half = len(y_t)//2
+        plt.plot(freqs[freq_mask], Yk[freq_mask])
+        plt.title("Spectrum of Filtered Signal")
+        plt.xlabel("Freq")
+        plt.ylabel("|Y|")
+        plt.grid(True)
+        plt.show()
+
+    if DEBUG_ALIASING:
+        Yk = np.abs(np.fft.fft(y_t, norm='ortho'))
+        freqs = np.fft.fftfreq(len(y_t), 1/baseband_sample_rate)
+        freq_mask = freqs > 0
+        plt.figure(figsize=(16, 8))
+        half = len(y_t)//2
+        plt.plot(freqs[freq_mask], Yk[freq_mask])
+        plt.title("Spectrum of Downsampled Signal")
+        plt.xlabel("Freq")
+        plt.ylabel("|Y|")
+        plt.grid(True)
+        plt.show()
+        
+    corr = signal.correlate(y_t, preamble, mode='valid')
+    peaks, _ = find_peaks(corr, height=0.95 * np.max(np.abs(corr)), distance=len(preamble))
+
+
+
+
+    # Get actual frame length
+    if len(peaks) > 1:
+        actual_frame_length = round(np.median(np.diff(peaks)))
+        # decode_logger.debug(f"Calculated Message Length {actual_frame_length} | Ideal {MESSAGE_LENGTH} | CP {STATE['cp_length']} | Num S {STATE['num_points_symbol']}")
+        actual_preamble_length = len(preamble)
+        actual_payload_length = actual_frame_length - actual_preamble_length
+        # decode_logger.debug(f"Received Symbol Length {actual_payload_length} | Preamble Generated {len(STATE['barker_code'])} | Preamble received {actual_preamble_length}")
+    peak = peaks[0]
 
     if debug_plots:
         plt.subplot(322)
-        plt.plot(voltages)
-        plt.title(f'Resampled Signal Length: {len(voltages)}')
+        plt.plot(y_t)
+        plt.title(f'Resampled Signal Length: {len(y_t)}')
         plt.xlabel('Sample')
         plt.ylabel('Amplitude')
 
     if debug_plots:
         plt.subplot(323)
-        plt.plot(corr)
+        plt.plot(corr[peak-20:peak+20])
         plt.title('Correlation with Preamble')
         plt.xlabel('Sample')
         plt.ylabel('Correlation')
                 # Add peak labels
-        for i, peak in enumerate(peaks):
-            plt.plot(peak, corr[peak], 'r^')  # Red triangle marker
-            plt.annotate(f'Peak {i+1}\n({peak})', 
-                        xy=(peak, corr[peak]),
-                        xytext=(10, 10),
-                        textcoords='offset points',
-                        ha='left',
-                        va='bottom',
-                        bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.5),
-                        arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0'))
+        # for i, peak in enumerate(peaks):
+        plt.plot(20, corr[peak], 'r^')  # Red triangle marker
+        i=0
+        plt.annotate(f'Peak {i+1}\n({peak})', 
+                    xy=(20, corr[peak]),
+                    xytext=(10, 10),
+                    textcoords='offset points',
+                    ha='left',
+                    va='bottom',
+                    bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.5),
+                    arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0'))
+
 
     # Parameters and frame extraction
-    preamble_length = len(preamble_sequence_upsampled)
-    ofdm_payload_length = int(num_points_frame - preamble_length)
-
-    peak = peaks[0]
     # decode_logger.debug(f"Peak : {peak}")
-    best_start = peak + preamble_length
-    # STATE['peaks'].append(best_peak)
-    # if len(peaks) > 1:
-    #     peaksnp = np.array(STATE['peaks'])
-    #     decode_logger.debug(f"Peak Mean: {peaksnp.mean()} | Peaks std: {peaksnp.std()} | Latest Peak {peak} | Latest eps {best_eps} ")
-    frame_end = best_start + ofdm_payload_length
-    frame = voltages[best_start:frame_end]
+    best_start = peak + actual_preamble_length 
+    frame_end = best_start + actual_payload_length
+    frame = y_t[best_start:frame_end]
 
     if debug_plots:
-        frames = []
-        for peak in peaks:
-            frame_end = best_start + ofdm_payload_length
-            frame = voltages[best_start:frame_end]
-            frames.append(frame)
         plt.subplot(324)
-        plt.plot(frames[0])
-        plt.title(f'First Extracted Frame Length: {len(frames[0])}')
+        plt.plot(frame)
+        plt.title(f'First Extracted Frame Length: {len(frame)}')
         plt.xlabel('Sample')
         plt.ylabel('Amplitude')
 
-        if len(frames) == 0:
-            raise ValueError("No valid frames detected")
-
     frame_y_t = np.array(frame)
     frame_len = len(frame_y_t)
-    symbol_len = frame_len // Nt
-    CP_length = int(symbol_len * CP_RATIO)
-    fft_len = symbol_len - CP_length
+    symbol_len = STATE['num_points_symbol'] 
+    fft_len = STATE['IFFT_LENGTH']           
+    CP_length = STATE['cp_length'] 
+
+    # decode_logger.debug(f"Transmitted: IFFT={STATE['IFFT_LENGTH']}, CP={STATE['cp_length']}, Total={STATE['num_points_symbol']}")
+    # decode_logger.debug(f"Received: FFT={fft_len}, CP={CP_length}, Total={symbol_len}")
+    # decode_logger.debug(f"Mismatch: FFT={fft_len - STATE['IFFT_LENGTH']}, CP={CP_length - STATE['cp_length']}")
 
     # decode_logger.debug(f"CP Length {CP_length}")
     # decode_logger.debug(f"FFT Length {fft_len}")
@@ -391,7 +515,7 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
             fft_lens = range(fft_len - window, fft_len + window + 1, 2)
             for N in fft_lens:
                 symbol_i = symbol_with_cp[CP_length:][:N]
-                debug_Y_half = rfft(symbol_i, n=N, norm="ortho", workers=os.cpu_count())
+                debug_Y_half = rfft(symbol_i, n=N, norm="ortho")
                 mag = 20*np.log10(np.abs(debug_Y_half) / (np.max(np.abs(debug_Y_half))))
                 k_peak = np.argmax(mag)
                 bins = np.arange(len(mag)) - k_peak
@@ -407,8 +531,6 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
             plt.grid(True, alpha=0.3)
             plt.legend(ncol=3, fontsize=8)
             plt.show()
-        symbol = symbol.astype(np.complex128)
-        symbol_with_cp = symbol_with_cp.astype(np.complex128)
         # Account for CFO 
         # n = np.arange(fft_len, dtype= np.complex128)
         # symbol *= np.exp(-1j * best_omega * n)
@@ -418,11 +540,6 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
 
     symbols_arr = np.ascontiguousarray(np.stack(symbols_with_cp).astype(np.float32))  # [Nt, fft_len + CP_len]
     symbols_arr -= np.mean(symbols_arr, axis=-1, keepdims=True) # Remove DC Bias
-    original_len = symbols_arr.shape[-1]
-    symbols_arr = power_preserving_resample(
-        symbols_arr, up=STATE['num_points_symbol'], down=original_len, axis=-1)
-    
-    # decode_logger.debug(f"Donsample: input {original_len} | output {STATE['num_points_symbol']}")
 
     STATE['last_time_symbol_received'] = symbols_arr
     # decode_logger.debug(f"Received time array power {np.mean(np.square(symbols_arr))} | shape {symbols_arr.shape}")
@@ -443,43 +560,58 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
                 STATE['time_decoder_out'] = symbols_arr
                 STATE['time_decoder_in'] = STATE['time_decoder_out']
     
-    
-    # Remove cyclic prefix
-    symbols_arr = symbols_arr[:, int(CP_RATIO * symbols_arr.shape[1]):]
+    # perform in band filters
+    if STATE['in_band_filter']:
+        symbols_arr = in_band_filter(symbols_arr, STATE['ks'], STATE['IFFT_LENGTH'])
 
-    Y_half = rfft(symbols_arr, n=STATE['IFFT_LENGTH'], axis=1, norm="ortho", workers=os.cpu_count())  # [Nt, fft_len//2+1]
-    STATE['last_freq_symbol_received'] = Y_half[:, :2 * STATE['Nf'] + num_zeros + 1]
+    # Remove cyclic prefix
+    symbols_arr = symbols_arr[:, CP_length:]
+
+    if DEBUG_ALIASING:
+        Yk = np.abs(np.fft.fft(symbols_arr[0], norm='ortho'))
+        freqs = np.fft.fftfreq(len(symbols_arr[0]), 1/baseband_sample_rate)
+        freq_mask1 = (freqs > 0)
+        freq_mask2 = (freqs > 0) & (freqs < int(100 * 1e3))
+        fig, ax = plt.subplots(2, 1, figsize=(12, 10))
+        half = len(symbols_arr[0])//2
+        ax[0].plot(freqs[freq_mask1], Yk[freq_mask1])
+        ax[1].plot(freqs[freq_mask2], Yk[freq_mask2])
+        ax[0].set_title("Spectrum of Symbol without CP")
+        ax[1].set_title("Spectrum of Symbol without CP")
+        ax[1].set_xlabel("Freq")
+        ax[1].set_ylabel("|Y|")
+        ax[0].set_xlabel("Freq")
+        ax[0].set_ylabel("|Y|")
+        plt.grid(True)
+        plt.show()
+
+    Y_half = rfft(symbols_arr, n=STATE['IFFT_LENGTH'], axis=1, norm="ortho")  # [Nt, fft_len//2+1
     data_subcarriers = Y_half[:, num_zeros+1 : num_zeros+1 + N_data]  # shape [Nt, N_data]
+    STATE['last_freq_symbol_received'] = data_subcarriers
 
     if STATE['normalize_power']:
         power_normalization = np.sqrt(np.mean(np.square(np.abs(data_subcarriers)), axis=1, keepdims=True))
-    else:
-        power_normalization = 1
-    data_subcarriers = data_subcarriers / power_normalization
-    # Convert to time domain
-    # decode_logger.debug(f"FFT Length {STATE['IFFT_LENGTH']}")
+        data_subcarriers = data_subcarriers / power_normalization
 
     if debug_plots:
         plt.subplot(325)
-        limited_magnitude = np.log10(np.abs(Y_half[0][1:2 * STATE['Nf']]))
+        limited_magnitude = np.log10(np.abs(Y_half[0][1:]))
 
         # Plot the FFT magnitude
         plt.plot(limited_magnitude)
         plt.title('FFT Magnitude of 1st symbol')
-        plt.xlabel('Frequency (Hz)')
+        plt.xlabel('Frequency (10 kHz)')
         plt.ylabel('Magnitude Log10')
 
     STATE['last_received'] = torch.tensor(data_subcarriers)
-    STATE['received_symbols'].append(data_subcarriers)
     data_subcarriers = np.concatenate(data_subcarriers)
 
     # Channel Estimation
-    X_k = np.array(STATE['sent_symbols'][-1])[0]
-    Y_k = np.array(STATE['received_symbols'][-1])[0]
+    X_k = np.array(STATE['last_sent'])[0]
+    Y_k = np.array(STATE['last_received'])[0]
     H_k = Y_k / (X_k + 1e-12)  # Avoid divide-by-zero
 
     # Save current results to compare to later for noise estimate
-    STATE['channel_estimates'].append(H_k)
     if debug_plots:
         # Plot Constellation Diagram
         frequencies_per_symbol = np.arange(f_min + subcarrier_delta_f, 
@@ -527,70 +659,19 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
         plt.tight_layout()
         plt.show()
         plt.close()
-
-    if PLOT_SNR and len(STATE['channel_estimates']) == 20:
-        H_ks = np.array(STATE['channel_estimates'])
-        H_ks_mean = np.mean(H_ks, axis=0)
-        H_ks_var = np.mean(np.square(np.abs(H_ks - H_ks_mean)), axis=0)
-        H_mag = np.abs(H_ks)
-        H_mag_mean = np.abs(H_ks_mean)
-        H_mag_std = np.std(H_mag, axis=0)
-        H_phase = np.unwrap(np.angle(H_ks), axis=0)
-        H_phase_mean = np.mean(H_phase, axis=0)
-        H_phase_std = np.std(H_phase, axis=0)
-        signal_power = np.abs(H_ks_mean)**2 * np.mean(np.abs(X_k)**2, axis=0)
-        noise_power = H_ks_var * np.mean(np.abs(X_k)**2, axis=0)
-        snr_est = signal_power / noise_power
-        snr_dB = 10 * np.log10(snr_est)
-        freqs = np.arange(f_min, f_max, subcarrier_delta_f)
-        C_total = np.trapz(np.log2(1 + snr_est), freqs)
-        fig, axs = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
-
-        # Magnitude plot
-        axs[0].plot(freqs, 20 * np.log10(H_mag_mean + 1e-12), label='Mean |H(f)| [dB]')
-        axs[0].fill_between(freqs,
-                            20 * np.log10(H_mag_mean - H_mag_std + 1e-12),
-                            20 * np.log10(H_mag_mean + H_mag_std + 1e-12),
-                            alpha=0.3, label='±1 STD')
-        axs[0].set_ylabel("Magnitude (dB)")
-        axs[0].set_title("Estimated Channel Magnitude ± STD")
-        axs[0].grid(True)
-        axs[0].legend()
-
-        # Phase plot
-        axs[1].plot(freqs, H_phase_mean * 180 / np.pi, label='Mean ∠H(f) [deg]')
-        axs[1].fill_between(freqs,
-                            (H_phase_mean - H_phase_std) * 180 / np.pi,
-                            (H_phase_mean + H_phase_std) * 180 / np.pi,
-                            alpha=0.3, label='±1 STD')
-        axs[1].set_ylabel("Phase (degrees)")
-        axs[1].set_title("Estimated Channel Phase ± STD")
-        axs[1].grid(True)
-        axs[1].legend()
-
-        # SNR plot
-        axs[2].plot(freqs, snr_dB, label='Estimated SNR [dB]', color='green')
-        axs[2].set_xlabel("Subcarrier Index")
-        axs[2].set_ylabel("SNR (dB)")
-        axs[2].set_title(f"Estimated SNR per Subcarrier with Estimated C{C_total: .3e}")
-        axs[2].grid(True)
-        axs[2].legend()
-
-        plt.tight_layout()
-        plt.show()
-        plt.close()
     return data_subcarriers.real.tolist(), data_subcarriers.imag.tolist()
 
 def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,  mode: str) -> list:
     # Instead of grabbing from labview, directly take from decoder
-    if 'decoder_out' in STATE:
-        symbols = STATE['decoder_out']
-    else:
-        symbols = torch.tensor(real_symbols) + 1j * torch.tensor(imag_symbols)
 
+    # symbols = torch.tensor(real_symbols) + 1j * torch.tensor(imag_symbols)
 
-    # Grab constellation object
+    symbols = STATE['last_received']
+    
+    # # Grab constellation object
     constellation = get_constellation(mode)
+    # true_bits_array = np.array(list(constellation.symbols_to_bits(STATE['last_sent'])))
+
 
     # Demap symbols to bits
     constellation_symbols = torch.tensor(
@@ -621,6 +702,8 @@ def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,
 
     # Calculate BER
     BER = float(np.sum(true_bits_array != decided_bits_flat_array) / len(true_bits_array))
+    evm = torch.mean(torch.square(torch.abs(STATE['last_sent'] - STATE['last_received'])))
+    # print("evm shapes:", STATE['last_sent'].shape, STATE['last_received'].shape)
 
     # Log frame BER
     STATE['frame_BER'] = BER
@@ -637,18 +720,21 @@ def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,
 
     elif STATE['time_model'] and STATE['validate_model']:
         cancel_run_early = False
+        if STATE['run_model']:
+            wandb.log({"freq model evm loss": evm})
+        else:
+             wandb.log({"freq no model evm loss": evm})
         make_time_validate_plots(STATE['time_encoder_in'], STATE['time_encoder_out'],
                                  STATE['time_decoder_in'], STATE['time_decoder_out'], 
                                  STATE['frame_BER'], STATE['run_model'], STATE['frequencies'])
+
     else:
         cancel_run_early = False
 
     SNR, PowerFactor = float(0), float(0)
 
-    evm = torch.mean(torch.square(torch.abs(STATE['last_sent'] - STATE['last_received'])))
-    
+    cancel_run_early = False
     return decided_bits_flat, float(BER), evm, PowerFactor, cancel_run_early
-
 
 def make_validate_plots(encoder_in, decoder_out, frame_BER, run_model, freqs=None):
     """
@@ -755,23 +841,23 @@ def make_time_validate_plots(encoder_in, encoder_out, decoder_in, decoder_out, f
     min_len = min(len(encoder_in.flatten()), len(decoder_out.flatten()))
     mse_total = np.mean((encoder_in.flatten()[:min_len] - decoder_out.flatten()[:min_len]) ** 2)
     prefix = "validate/time_model_" if run_model else "validate/time_no_model_"
-    wandb.log({f"{prefix}evm_loss": mse_total})
+    wandb.log({f"{prefix}mse_loss": mse_total})
     wandb.log({f"{prefix}frame_BER": frame_BER})
     fig, axes = plt.subplots(3, 1, figsize=(12, 16))
     zoom_samples = 200
     time_points = np.arange(zoom_samples)
-    axes[0].plot(time_points, encoder_in.flatten()[:zoom_samples], 'r', alpha=0.5, label='Encoder Input', linewidth=1)
-    axes[0].plot(time_points, encoder_out.flatten()[:zoom_samples], 'b', alpha=0.8, label='Encoder Output', linewidth=1)
+    axes[0].plot(time_points, encoder_in.flatten()[2 * zoom_samples: 3 *zoom_samples], 'r', alpha=0.5, label='Encoder Input', linewidth=1)
+    axes[0].plot(time_points, encoder_out.flatten()[2 * zoom_samples: 3 *zoom_samples], 'b', alpha=0.8, label='Encoder Output', linewidth=1)
     axes[0].set_title(f"Encoder Comparison (MSE: {mse_encoder:.2e}) | In {enc_power_in: .3f} | Out {enc_power_out: .3f} | Scale {enc_scale: .3f}")
     axes[0].legend()
     axes[0].grid(True)
-    axes[1].plot(time_points, decoder_in.flatten()[:zoom_samples], 'r', alpha=0.5, label='Decoder Input', linewidth=1)
-    axes[1].plot(time_points, decoder_out.flatten()[:zoom_samples], 'b', alpha=0.8, label='Decoder Output', linewidth=1)
+    axes[1].plot(time_points, decoder_in.flatten()[2 * zoom_samples: 3 *zoom_samples], 'r', alpha=0.5, label='Decoder Input', linewidth=1)
+    axes[1].plot(time_points, decoder_out.flatten()[2 * zoom_samples: 3 *zoom_samples], 'b', alpha=0.8, label='Decoder Output', linewidth=1)
     axes[1].set_title(f"Decoder Comparison (MSE: {mse_decoder:.2e}) | In {dec_power_in: .4f} | Out {dec_power_out:.3f} | Scale {dec_scale: .3f}")
     axes[1].legend()
     axes[1].grid(True)
-    axes[2].plot(time_points, encoder_in.flatten()[:zoom_samples], 'r', alpha=0.5, label='Original Input', linewidth=1)
-    axes[2].plot(time_points, decoder_out.flatten()[:zoom_samples], 'b', alpha=0.8, label='Final Output', linewidth=1)
+    axes[2].plot(time_points, encoder_in.flatten()[2 * zoom_samples: 3 *zoom_samples], 'r', alpha=0.5, label='Original Input', linewidth=1)
+    axes[2].plot(time_points, decoder_out.flatten()[2 * zoom_samples: 3 *zoom_samples], 'b', alpha=0.8, label='Final Output', linewidth=1)
     axes[2].set_title(f"End-to-End Comparison ({'Trained' if run_model else 'Untrained'})\nMSE: {mse_total:.2e}, BER: {frame_BER:.2f}")
     axes[2].legend()
     axes[2].grid(True)
@@ -781,6 +867,44 @@ def make_time_validate_plots(encoder_in, encoder_out, decoder_in, decoder_out, f
     fig.savefig(plot_path, dpi=150)
     wandb.log({f"{prefix}time_signals": wandb.Image(plot_path)})
     plt.close(fig)
+
+    freq_sent = np.asarray(STATE['last_sent']).flatten()
+    freq_received = np.asarray(STATE['last_received']).flatten()
+    fig_const, axc = plt.subplots(figsize=(6, 6))
+    axc.scatter(freq_sent.real, freq_sent.imag, c='r', alpha=0.5, s=10, label='Sent')
+    axc.scatter(freq_received.real, freq_received.imag, c='b', alpha=0.5, s=10, label='Received')
+    axc.set_title("Constellation Diagram")
+    axc.set_xlabel("In-Phase")
+    axc.set_ylabel("Quadrature")
+    axc.legend()
+    axc.grid(True)
+    plot_path_const = f"wandb_time_domain/{prefix}constellation.png"
+    os.makedirs(os.path.dirname(plot_path_const), exist_ok=True)
+    fig_const.tight_layout()
+    fig_const.savefig(plot_path_const, dpi=150)
+    wandb.log({f"{prefix}constellation": wandb.Image(plot_path_const)})
+    plt.close(fig_const)
+
+    min_len = min(len(freq_sent), len(freq_received))
+    freq_sent = freq_sent[:min_len]
+    freq_received = freq_received[:min_len]
+
+    evm_per_freq = (np.abs(freq_received - freq_sent) ** 2) / (np.abs(freq_sent) ** 2 + 1e-12)
+
+    freqs_axis = np.arange(min_len)
+    fig_evm, axe = plt.subplots(figsize=(10, 4))
+    axe.plot(freqs_axis, evm_per_freq, 'b-', linewidth=1)
+    axe.set_title("EVM per Frequency")
+    axe.set_xlabel("Subcarrier Index")
+    axe.set_ylabel("EVM (dB)")
+    axe.grid(True)
+    plot_path_evm = f"wandb_time_domain/{prefix}evm_per_freq.png"
+    os.makedirs(os.path.dirname(plot_path_evm), exist_ok=True)
+    fig_evm.tight_layout()
+    fig_evm.savefig(plot_path_evm, dpi=150)
+    wandb.log({f"{prefix}evm_per_freq": wandb.Image(plot_path_evm)})
+    plt.close(fig_evm)
+
     if os.path.exists(plot_path):
         os.remove(plot_path)
     if STATE['run_model']:
