@@ -88,6 +88,7 @@ def modulate_data_OFDM(mode: str,
     STATE['delta_f'] = subcarrier_delta_f
     STATE['frequencies'] = np.arange(f_min, f_max, subcarrier_delta_f)
     STATE['ks'] = (STATE['frequencies'] / subcarrier_delta_f).astype(int)
+    STATE['bad_frame'] = False # flag if peaks aren't found
     
     # Grab constellation object
     constellation = get_constellation(mode)
@@ -133,7 +134,7 @@ def modulate_data_OFDM(mode: str,
 AWG_MEMORY_LENGTH_MAX = 16384
 SCALING_FACTOR = 2
 MESSAGE_LENGTH = 16384 // SCALING_FACTOR
-BARKER_LENGTH = 384 / SCALING_FACTOR
+BARKER_LENGTH = 384 // SCALING_FACTOR
 CP_RATIO = 0.25 # Need Message length - barker cleanly divisible by 4
 
 def symbols_to_time(X, upsampling_factor: int, num_leading_zeros):
@@ -232,9 +233,10 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
 
     cyclic_prefix_length = round(SYMBOL_LENGTH * CP_RATIO)
     # decode_logger.debug(f"IFFT padding zeros {number_of_zeros}")
- 
 
     x_t_no_cp = irfft(half_spectrum, n=IFFT_LENGTH, axis=1, norm='ortho', workers=os.cpu_count()).astype(np.float32, copy=False)
+
+    x_t_no_c = x_t_no_cp * np.sqrt(x_t_no_cp.shape[1])
     # Add cyclic prefix per symbol
     x_t_groups = []
     for row in x_t_no_cp:
@@ -381,73 +383,89 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
     down = frac.denominator
     # Downsample received waveformdecd
     # decode_logger.debug(f"Downsample factor {downsample_factor}")
-    y_t = resample_poly(y_t, up=up, down=down)
-    preamble = np.array(preamble_sequence)
 
     DEBUG_ALIASING = False
-
-
-    # Filter out high frequency content from preamble to avoid rollover
-    # b, a = butter(N=16, Wn=cutoff, btype='low', fs=osc_sample_rate)
-    # y_t_filtered = filtfilt(b, a, y_t)
-
     if DEBUG_ALIASING:
         # plot current received spectrum
-        Yk = np.abs(np.fft.fft(y_t, norm='ortho'))
-        freqs = np.fft.fftfreq(len(y_t), 1/osc_sample_rate)
-        freq_mask = (freqs <= 2 * baseband_nyquist_rate) & (freqs > 0)
+        Yk1 = np.log10(np.abs(np.fft.fft(y_t, norm='ortho')) ** 2)
+        freqs1 = np.fft.fftfreq(len(y_t), 1/osc_sample_rate)
+        freq_mask1 = (freqs1 > 0)
         plt.figure(figsize=(16, 8))
         half = len(y_t)//2
-        plt.plot(freqs[freq_mask], Yk[freq_mask])
+        plt.plot(freqs1[freq_mask1], Yk1[freq_mask1])
         plt.title("Spectrum of Received Signal")
         plt.xlabel("Freq")
         plt.ylabel("|Y|")
         plt.grid(True)
         plt.show()
 
-
+    
+    # Filter out high frequency content from preamble to avoid rollover
+    # b, a = butter(N=4, Wn=baseband_nyquist_rate, btype='low', fs=osc_sample_rate)
+    # y_t_filtered = filtfilt(b, a, y_t)
     y_t_filtered = y_t
+
     if DEBUG_ALIASING:
-        Yk = np.abs(np.fft.fft(y_t_filtered, norm='ortho'))
-        freqs = np.fft.fftfreq(len(y_t), 1/osc_sample_rate)
-        freq_mask = (freqs <= 2 * baseband_nyquist_rate) & (freqs > 0)
+        Yk2 = np.log10(np.abs(np.fft.fft(y_t_filtered, norm='ortho')) ** 2)
+        freqs2 = np.fft.fftfreq(len(y_t_filtered), 1/osc_sample_rate)
+        freq_mask2 = (freqs2 > 0)
         plt.figure(figsize=(16, 8))
-        half = len(y_t)//2
-        plt.plot(freqs[freq_mask], Yk[freq_mask])
+        half = len(y_t_filtered)//2
+        plt.plot(freqs2[freq_mask2], Yk2[freq_mask2])
         plt.title("Spectrum of Filtered Signal")
         plt.xlabel("Freq")
         plt.ylabel("|Y|")
         plt.grid(True)
         plt.show()
 
+    y_t_downsampled = resample_poly(y_t_filtered, up=up, down=down)
+    preamble = np.array(preamble_sequence)
+
+
     if DEBUG_ALIASING:
-        Yk = np.abs(np.fft.fft(y_t, norm='ortho'))
-        freqs = np.fft.fftfreq(len(y_t), 1/baseband_sample_rate)
-        freq_mask = freqs > 0
+        Yk3 = np.log10(np.abs(np.fft.fft(y_t_downsampled, norm='ortho')) ** 2)
+        freqs3 = np.fft.fftfreq(len(y_t_downsampled), 1/baseband_sample_rate)
+        freq_mask3 = freqs3 > 0
         plt.figure(figsize=(16, 8))
-        half = len(y_t)//2
-        plt.plot(freqs[freq_mask], Yk[freq_mask])
+        half = len(y_t_downsampled)//2
+        plt.plot(freqs3[freq_mask3], Yk3[freq_mask3])
         plt.title("Spectrum of Downsampled Signal")
         plt.xlabel("Freq")
         plt.ylabel("|Y|")
         plt.grid(True)
         plt.show()
         
-    corr = signal.correlate(y_t, preamble, mode='valid')
-    peaks, _ = find_peaks(corr, height=0.95 * np.max(np.abs(corr)), distance=len(preamble))
+    corr = signal.correlate(y_t_downsampled, preamble, mode='valid')
+    corr = corr / np.max(corr)
+    corr = np.power(corr, 2)
+    peaks, _ = find_peaks(corr, height=0.9 * np.max(np.abs(corr)), distance=len(preamble), prominence=0.2)
 
 
 
 
     # Get actual frame length
+    actual_preamble_length = len(preamble)
     if len(peaks) > 1:
-        actual_frame_length = round(np.median(np.diff(peaks)))
-        # decode_logger.debug(f"Calculated Message Length {actual_frame_length} | Ideal {MESSAGE_LENGTH} | CP {STATE['cp_length']} | Num S {STATE['num_points_symbol']}")
-        actual_preamble_length = len(preamble)
-        actual_payload_length = actual_frame_length - actual_preamble_length
+        actual_message_length = round(np.median(np.diff(peaks)))
+        # decode_logger.debug(f"Calculated Message Length {actual_message_length} | Ideal {MESSAGE_LENGTH} | CP {STATE['cp_length']} | Num S {STATE['num_points_symbol']}")
+        actual_symbol_length = actual_message_length - actual_preamble_length
+        actual_cp_length = round(CP_RATIO * actual_symbol_length)
+        actual_fft_len = actual_symbol_length - actual_cp_length
+        fft_len = actual_fft_len
+        CP_length = actual_cp_length
+        symbol_length = actual_symbol_length
         # decode_logger.debug(f"Received Symbol Length {actual_payload_length} | Preamble Generated {len(STATE['barker_code'])} | Preamble received {actual_preamble_length}")
+
+    else:
+        STATE['bad_frame'] = True
+        symbol_length = STATE['num_points_symbol'] 
+        CP_length = STATE['cp_length']
+        fft_len = STATE['IFFT_LENGTH']
+        
+
     peak = peaks[0]
 
+    STATE['last_peak'] = peak
     if debug_plots:
         plt.subplot(322)
         plt.plot(y_t)
@@ -477,9 +495,10 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
 
     # Parameters and frame extraction
     # decode_logger.debug(f"Peak : {peak}")
+
     best_start = peak + actual_preamble_length 
-    frame_end = best_start + actual_payload_length
-    frame = y_t[best_start:frame_end]
+    frame_end = best_start + symbol_length
+    frame = y_t_downsampled[best_start:frame_end]
 
     if debug_plots:
         plt.subplot(324)
@@ -491,12 +510,12 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
     frame_y_t = np.array(frame)
     frame_len = len(frame_y_t)
     symbol_len = STATE['num_points_symbol'] 
-    fft_len = STATE['IFFT_LENGTH']           
-    CP_length = STATE['cp_length'] 
+    # fft_len = STATE['IFFT_LENGTH']           
+
 
     # decode_logger.debug(f"Transmitted: IFFT={STATE['IFFT_LENGTH']}, CP={STATE['cp_length']}, Total={STATE['num_points_symbol']}")
-    # decode_logger.debug(f"Received: FFT={fft_len}, CP={CP_length}, Total={symbol_len}")
-    # decode_logger.debug(f"Mismatch: FFT={fft_len - STATE['IFFT_LENGTH']}, CP={CP_length - STATE['cp_length']}")
+    # decode_logger.debug(f"Received: FFT={actual_fft_len}, CP={actual_cp_length}, Total={actual_symbol_length}")
+    # decode_logger.debug(f"Mismatch: FFT={actual_fft_len - STATE['IFFT_LENGTH']}, CP={CP_length - STATE['cp_length']}")
 
     # decode_logger.debug(f"CP Length {CP_length}")
     # decode_logger.debug(f"FFT Length {fft_len}")
@@ -531,10 +550,6 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
             plt.grid(True, alpha=0.3)
             plt.legend(ncol=3, fontsize=8)
             plt.show()
-        # Account for CFO 
-        # n = np.arange(fft_len, dtype= np.complex128)
-        # symbol *= np.exp(-1j * best_omega * n)
-        # symbol /= np.max(np.abs(symbol)) + 1e-12
         symbols.append(symbol)
         symbols_with_cp.append(symbol_with_cp)
 
@@ -567,23 +582,6 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
     # Remove cyclic prefix
     symbols_arr = symbols_arr[:, CP_length:]
 
-    if DEBUG_ALIASING:
-        Yk = np.abs(np.fft.fft(symbols_arr[0], norm='ortho'))
-        freqs = np.fft.fftfreq(len(symbols_arr[0]), 1/baseband_sample_rate)
-        freq_mask1 = (freqs > 0)
-        freq_mask2 = (freqs > 0) & (freqs < int(100 * 1e3))
-        fig, ax = plt.subplots(2, 1, figsize=(12, 10))
-        half = len(symbols_arr[0])//2
-        ax[0].plot(freqs[freq_mask1], Yk[freq_mask1])
-        ax[1].plot(freqs[freq_mask2], Yk[freq_mask2])
-        ax[0].set_title("Spectrum of Symbol without CP")
-        ax[1].set_title("Spectrum of Symbol without CP")
-        ax[1].set_xlabel("Freq")
-        ax[1].set_ylabel("|Y|")
-        ax[0].set_xlabel("Freq")
-        ax[0].set_ylabel("|Y|")
-        plt.grid(True)
-        plt.show()
 
     Y_half = rfft(symbols_arr, n=STATE['IFFT_LENGTH'], axis=1, norm="ortho")  # [Nt, fft_len//2+1
     data_subcarriers = Y_half[:, num_zeros+1 : num_zeros+1 + N_data]  # shape [Nt, N_data]

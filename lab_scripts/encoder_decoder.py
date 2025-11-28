@@ -20,7 +20,6 @@ import matplotlib.cm as cm
 import matplotlib.colors as colors
 import time
 import pprint
-from transformers import get_linear_schedule_with_warmup
 import traceback
 from lab_scripts.constellation_diagram import QPSK_Constellation
 from lab_scripts.constellation_diagram import RingShapedConstellation
@@ -51,7 +50,7 @@ STATE['normalize_power'] = False
 load_model = False # Variable
 LOAD_DIR = ""
 if load_model:
-    model_name = "fresh-universe-5572" # Variable
+    model_name = "laced-sky-7163" # Variable
     base_dir = r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\models\pickled_models"
     LOAD_DIR = os.path.join(base_dir, model_name)
     with open(os.path.join(LOAD_DIR, "config.json"), "r") as f:
@@ -464,22 +463,22 @@ if not STATE['validate_model']:
 optimizer = optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=float(config.lr))
 if config.scheduler_type == "reduce_lr_on_plateu":
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=20, min_lr=1e-6)
-elif config.scheduler_type == "warmup":
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=config.warmup_steps,
-        num_training_steps=config.epochs
-    )
+# elif config.scheduler_type == "warmup":
+#     scheduler = get_linear_schedule_with_warmup(
+#         optimizer,
+#         num_warmup_steps=config.warmup_steps,
+#         num_training_steps=config.epochs
+#     )
 if STATE['train_channel']:
     channel_optimizer = optim.Adam(list(channel_model.parameters()), lr=float(config.lr))
     if config.scheduler_type == "reduce_lr_on_plateu":
         channel_scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=20, min_lr=1e-6)
-    elif config.scheduler_type == "warmup":
-        channel_scheduler = get_linear_schedule_with_warmup(
-            channel_optimizer,
-            num_warmup_steps=config.warmup_steps,
-            num_training_steps=config.epochs
-        )
+    # elif config.scheduler_type == "warmup":
+    #     channel_scheduler = get_linear_schedule_with_warmup(
+    #         channel_optimizer,
+    #         num_warmup_steps=config.warmup_steps,
+    #         num_training_steps=config.epochs
+    #     )
 
     STATE['channel_optimizer'] = channel_optimizer
     STATE['channel_scheduler'] = channel_scheduler
@@ -846,22 +845,27 @@ def solve_channel_noise_RY(real, imag):
                         freqs=STATE['frequencies'],
                         noise_sample_indexing=False,
                         received_time=STATE['last_time_symbol_received'],
-                        h5_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\wideband_3.1V.h5")
+                        h5_path= r"C:\Users\Public_Testing\perDesktop\peled_interconnect\mldrivenpeled\data\channel_measurements\wideband_3.1V.h5")
     print(f"Appended new symbol, distinct symbol #{NOISY_STATE['distinct_symbol']}")
     STATE['decoder_out'] = out
     out = out.flatten()
     return out.real.detach().cpu().contiguous().numpy().tolist(), out.imag.detach().cpu().contiguous().numpy().tolist()
 
+gaussian_toggle = True
 def train_channel_model_TX(real, imag, f_low, f_high, subcarrier_spacing):
     # real = torch.tensor(real, dtype=torch.float32, device=device)
     # imag = torch.tensor(imag, dtype=torch.float32, device=device)
     Nt = STATE['Nt']
     Nf = STATE['Nf']
 
-
     # generator = torch.Generator()
     # generator.manual_seed(42)
-
+    global gaussian_toggle
+    # if gaussian_toggle:
+    #     # Sample from Gaussian
+    #     out = (1 / np.sqrt(2)) * (torch.randn(Nt, Nf) + 1j * torch.randn(Nt, Nf))
+    #     gaussian_toggle = False
+    # else:
     # Grab constellation and add small complex noise
     jitter_power = 1e-1
     jitter = np.sqrt(jitter_power/2)*(torch.randn(Nt, Nf) + 1j * torch.randn(Nt, Nf))
@@ -873,6 +877,8 @@ def train_channel_model_TX(real, imag, f_low, f_high, subcarrier_spacing):
     bits = "".join(bit_strings)
     out = torch.tensor(constellation.bits_to_symbols(bits)).reshape(Nt, Nf)
     out += jitter
+    # gaussian_toggle = True
+
     if STATE['normalize_power']:
         out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
 
@@ -900,8 +906,11 @@ def train_channel_model_RY(real, imag):
         predicted_symbols = STATE['channel_prediction']
         loss = evm_loss(predicted_symbols, out)
     append_symbol_frame(STATE['last_sent'],
-                        STATE['last_freq_symbol_received'], STATE['last_time_symbol_received'], STATE['frequencies'],
-                        zarr_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\wide_channel_25MHz_3.5V_scale2.zarr")
+                        STATE['last_freq_symbol_received'],
+                        STATE['last_time_symbol_received'],
+                        STATE['frequencies'],
+                        zarr_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\channel_nobiast_3e5-15MHz_3.5V_scale2.zarr",
+                        metadata={"peak":STATE['last_peak']})
     STATE['cycle_count'] += 1
     if loss is not None:
         STATE['loss_accumulator'].append(loss)
@@ -1774,27 +1783,35 @@ def append_symbol_frame(
     received = to_numpy(received).astype(np.complex64)
     freqs = to_numpy(freqs).astype(np.float32)
     # attempt to open file until 5 seconds have passed
+    if STATE['bad_frame'] == True:
+        STATE['bad_frame'] == False
+        decode_logger.info("[append skipped] Previous bad frame detected, skipping append.")
+        return None
     try:
         f = zarr.open(zarr_path, mode='a')
 
         time_stamp = int(time.time())
         group_name = f"frame_{time_stamp}"
         grp = f.create_group(group_name, overwrite=False)
-        grp.create_array("sent", sent, compressor="default", chunks=True)
-        grp.create_array("received", received, compressor="default", chunks=True)
-        grp.create_array("freqs", freqs, compressor="default", chunks=True)
+        grp['sent'] = sent
+        grp['received'] = received
+        grp['freqs'] = freqs
+        # grp.create_array("sent", sent, compressor="default", chunks=True)
+        # grp.create_array("received", received, compressor="default", chunks=True)
+        # grp.create_array("freqs", freqs, compressor="default", chunks=True)
         
         if received_time is not None:
             cp_length = STATE['cp_length']
             num_points_symbol = STATE['num_points_symbol']
             grp.attrs["num_points_symbol"] = num_points_symbol
             grp.attrs["cp_length"] = cp_length
-            grp.create_array(
-                "received_time",
-                received_time.astype(np.float32),
-                compressor="default",
-                chunks=True         
-            )
+            grp['received_time'] = received_time.astype(np.float32)
+            # grp.create_array(
+            #     "received_time",
+            #     received_time.astype(np.float32),
+            #     compressor="default",
+            #     chunks=True         
+            # )
        
         # Store metadata if provided
         if metadata:
