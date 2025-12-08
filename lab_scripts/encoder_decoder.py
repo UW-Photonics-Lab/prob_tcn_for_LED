@@ -332,8 +332,6 @@ class TCNBlock(nn.Module):
         out = F.pad(x, (self.padding, 0))
         out = self.conv(out)
         out = self.relu(out)
-        if out.size(2) > x.size(2):
-            out = out[:, :, :x.size(2)]
         if self.resample:
             x = self.resample(x)
         return out + x  # residual connection
