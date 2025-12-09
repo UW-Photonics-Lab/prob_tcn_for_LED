@@ -4,6 +4,7 @@ from noisy_state import NOISY_STATE
 # from lab_scripts.training_state import STATE
 # from lab_scripts.noisy_state import NOISY_STATE
 import h5py
+import random
 import zarr
 import time
 import torch
@@ -50,7 +51,7 @@ STATE['normalize_power'] = False
 load_model = False # Variable
 LOAD_DIR = ""
 if load_model:
-    model_name = "laced-sky-7163" # Variable
+    model_name = "dandy-spaceship-7930" # Variable
     base_dir = r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\models\pickled_models"
     LOAD_DIR = os.path.join(base_dir, model_name)
     with open(os.path.join(LOAD_DIR, "config.json"), "r") as f:
@@ -569,6 +570,7 @@ def validate_time_encoder(x_t):
         with torch.no_grad():
             x_t = torch.tensor(x_t, dtype=torch.float32)
             # decode_logger.debug(f"Encoder in {x_t.shape}")
+            decode_logger.debug(f"Encoder Avg Pwr In {x_t.square().mean().item(): .3f}")
             STATE['time_encoder_in'] = x_t.detach().cpu().numpy()
             x_t = STATE["encoder"](x_t)
             # decode_logger.debug(f"Encoder out {x_t.shape}")
@@ -852,6 +854,7 @@ def solve_channel_noise_RY(real, imag):
     return out.real.detach().cpu().contiguous().numpy().tolist(), out.imag.detach().cpu().contiguous().numpy().tolist()
 
 gaussian_toggle = True
+power_toggle = True
 def train_channel_model_TX(real, imag, f_low, f_high, subcarrier_spacing):
     # real = torch.tensor(real, dtype=torch.float32, device=device)
     # imag = torch.tensor(imag, dtype=torch.float32, device=device)
@@ -861,6 +864,7 @@ def train_channel_model_TX(real, imag, f_low, f_high, subcarrier_spacing):
     # generator = torch.Generator()
     # generator.manual_seed(42)
     global gaussian_toggle
+    global power_toggle
     # if gaussian_toggle:
     #     # Sample from Gaussian
     #     out = (1 / np.sqrt(2)) * (torch.randn(Nt, Nf) + 1j * torch.randn(Nt, Nf))
@@ -879,6 +883,13 @@ def train_channel_model_TX(real, imag, f_low, f_high, subcarrier_spacing):
     out += jitter
     # gaussian_toggle = True
 
+    if power_toggle:
+        random_float = random.uniform(0.5, 3)
+        out = random_float * (out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12))
+        power_toggle = False
+    else:
+        power_toggle = True
+    # decode_logger.debug(f"Sent out power {out.abs().pow(2).mean().item()}")
     if STATE['normalize_power']:
         out = out / (out.abs().pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-12)
 
@@ -909,7 +920,7 @@ def train_channel_model_RY(real, imag):
                         STATE['last_freq_symbol_received'],
                         STATE['last_time_symbol_received'],
                         STATE['frequencies'],
-                        zarr_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\channel_nobiast_3e5-15MHz_3.5V_scale2.zarr",
+                        zarr_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\channel_3e5-8.6MHz_2.7V_scale2_dynamic_power_0.5-3.zarr",
                         metadata={"peak":STATE['last_peak']})
     STATE['cycle_count'] += 1
     if loss is not None:

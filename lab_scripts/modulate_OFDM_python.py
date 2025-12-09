@@ -266,6 +266,8 @@ def add_preamble_and_upsample(x_t_frame, preamble):
     preamble_max = np.max(preamble)
     # decode_logger.debug(f"Preamble heights {preamble_min} | {preamble_max}")
     x_t_frame = np.clip(x_t_frame, preamble_min, preamble_max)
+    # decode_logger.debug(f"Encoder output mean power{np.mean(np.square(x_t_frame))} | output shape: {x_t_frame.shape} | output max {np.max(np.abs(x_t_frame))}")
+
     x_t_with_barker = np.concatenate([preamble, x_t_frame])
 
     if False:
@@ -813,11 +815,13 @@ def make_validate_plots(encoder_in, decoder_out, frame_BER, run_model, freqs=Non
     plt.close(fig)
     if os.path.exists(plot_path):
         os.remove(plot_path)
-    
-    if STATE['run_model']:
-        STATE['run_model'] = False
-    else:
-        STATE['run_model'] = True
+
+
+    # if commented out this allows the model to always run    
+    # if STATE['run_model']: 
+    #     STATE['run_model'] = False
+    # else:
+    #     STATE['run_model'] = True
 
 def make_time_validate_plots(encoder_in, encoder_out, decoder_in, decoder_out, frame_BER, run_model, freqs=None):
     encoder_in = np.asarray(encoder_in)
@@ -905,7 +909,7 @@ def make_time_validate_plots(encoder_in, encoder_out, decoder_in, decoder_out, f
 
     if os.path.exists(plot_path):
         os.remove(plot_path)
-    if STATE['run_model']:
-        STATE['run_model'] = False
-    else:
-        STATE['run_model'] = True
+    # if STATE['run_model']:
+    #     STATE['run_model'] = False
+    # else:
+    #     STATE['run_model'] = True
