@@ -38,10 +38,10 @@ def symbols_to_time(X,
         # Make hermetian symmetric
         Nt, Nf = X.shape
         device = X.device
-        num_right_padding_zeros = torch.zeros(Nt, num_right_padding_zeros)
-        num_left_padding_zeros = torch.zeros(Nt, num_left_padding_zeros)
+        num_right_padding_zeros = torch.zeros(Nt, num_right_padding_zeros, device=device)
+        num_left_padding_zeros = torch.zeros(Nt, num_left_padding_zeros, device=device)
         X = torch.cat([num_left_padding_zeros, X, num_right_padding_zeros], dim=-1)
-        DC_Nyquist = torch.zeros((X.shape[0], 1))
+        DC_Nyquist = torch.zeros((X.shape[0], 1), device=device)
         X_hermitian = torch.flip(X, dims=[1]).conj()
         X_full = torch.hstack([DC_Nyquist, X, DC_Nyquist, X_hermitian])
 
@@ -275,7 +275,7 @@ def in_band_filter(x, ks_indices, nfft):
 def in_band_time_loss(sent_time, decoded_time, ks_indices, n_fft, num_taps):
     """Compute in-band loss directly in time domain using filtering"""
     # Create frequency mask
-    mask = torch.zeros(n_fft, DEVICE=sent_time.DEVICE)
+    mask = torch.zeros(n_fft, device=sent_time.device)
     neg_ks_indices = n_fft - ks_indices
     mask[ks_indices] = 1.0
     mask[neg_ks_indices] = 1.0
@@ -297,7 +297,7 @@ def calculate_BER(received_symbols, true_bits, constellation):
     constellation_symbols = torch.tensor(
         list(constellation._symbols_to_bits_map.keys()),
         dtype=received_symbols.dtype,
-        DEVICE=received_symbols.DEVICE
+        device=received_symbols.device
     )
     distances = abs(received_symbols.reshape(-1, 1) - constellation_symbols.reshape(1, -1))
 
