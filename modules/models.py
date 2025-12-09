@@ -54,7 +54,7 @@ class TCN(nn.Module):
         out = self.readout(out).squeeze(1)
         out = out - out.mean(dim=1, keepdim=True)  # [B,T]
         return out
-    
+
 
 class TCN_channel(nn.Module):
     def __init__(self, nlayers=3, dilation_base=2, num_taps=10,
@@ -88,11 +88,11 @@ class TCN_channel(nn.Module):
         Samples from a Student's t-distribution using PyTorch's built-in implementation.
         Uses rsample() to maintain gradients for 'std' and 'nu'.
         """
-        nu = torch.clamp(nu, min=2.001) 
+        nu = torch.clamp(nu, min=2.001)
         std = torch.clamp(std, min=1e-6)
         dist = StudentT(df=nu, loc=mean, scale=std)
         return dist.rsample()
-    
+
 
     def sample_student_t_mps(self, mean, std, nu):
         '''
@@ -128,7 +128,7 @@ class TCN_channel(nn.Module):
                 noisy_out = self.sample_student_t_mps(mean_out, std_out, nu_out)
             else:
                 noisy_out = self.sample_student_t_pytorch(mean_out, std_out, nu_out)
-            
+
         if self.learn_noise:
             return noisy_out, mean_out, std_out, nu_out
         else:
@@ -177,7 +177,7 @@ class memory_polynomial_channel(nn.Module):
         stack = stack.permute(1, 2, 0) # [B, T, freatures]
         A = stack.reshape(regressor_length, num_regressors)
         return A
-    
+
     def show_terms(self, plot=False):
         weights = self.weights.detach().cpu()
         terms = []
@@ -187,7 +187,6 @@ class memory_polynomial_channel(nn.Module):
             terms.append(f"x[{-i}]")
             linear_weights.append(weights[idx].item())
             idx += 1
-        
         if plot:
             plt.plot(linear_weights)
             plt.title("Plot of Linear Weights vs. Memory Length")
@@ -214,7 +213,7 @@ class memory_polynomial_channel(nn.Module):
             weights = self.weights.detach().cpu().tolist()
 
         return terms, weights
-    
+
     def calculate_err(self, X, Y, plot=False):
         A = self._create_regressors(X)
         Q, R = torch.linalg.qr(A, mode='reduced')
@@ -236,12 +235,12 @@ class memory_polynomial_channel(nn.Module):
             print("-" * 50)
             print(f"{'Rank':<5} | {'Term String':<20} | {'ERR (%)':<15}")
             print("-" * 50)
-            
+
             cumulative_err = 0.0
             for i, (term, err) in enumerate(ranked_data):
                 cumulative_err += err
                 print(f"{i+1:<5} | {term:<20} | {err:.6f}%")
-            
+
             print("-" * 50)
             print(f"Total Variance Explained: {cumulative_err:.4f}%")
             print(f"  > Linear Contribution:    {total_linear_err:.4f}%")
