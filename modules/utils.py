@@ -10,6 +10,7 @@ import wandb
 import torch.optim as optim
 import torch.nn.functional as F
 import sys
+import json
 from modules.models import TCN_channel, TCN
 
 @dataclass
@@ -134,21 +135,21 @@ def extract_zarr_data(file_path, device, delay=None):
 
 class ChannelData(Dataset):
     def __init__(self,
-                sent_frames,
-                received_frames,
+                sent,
+                received,
                 frequencies,
                 transform=None,
                 target_transform=None):
 
-        self.sent_frames = sent_frames
-        self.received_frames = received_frames
-        assert len(sent_frames) == len(received_frames)
+        self.sent = sent
+        self.received = received
+        assert len(sent) == len(received)
 
     def __len__(self):
-        return len(self.sent_frames)
+        return len(self.sent)
 
     def __getitem__(self, idx):
-        return self.sent_frames[idx], self.received_frames[idx]
+        return self.sent[idx], self.received[idx]
 
 def log_snr_plots(y_preds, noisy_y_preds, ofdm_settings):
     '''
@@ -326,11 +327,71 @@ def calculate_BER(received_symbols, true_bits, constellation):
 def evm_loss(true_symbols, predicted_symbols):
     return torch.mean(torch.abs(true_symbols - predicted_symbols) ** 2)
 
-def load_runs_final_artifact(run_name,
-                             device,
-                             model_type="channel",
-                             entity="dylanbackprops-university-of-washington",
-                             project="mldrivenpeled"):
+def load_runs_final_artifact(
+    run_name,
+    device,
+    model_type="channel",
+    entity="dylanbackprops-university-of-washington",
+    project="mldrivenpeled"
+):
+    '''
+    Loads checkpoint from local path if available, otherwise queries wandb API
+    
+    :param run_name: name for cache directory of wandb run name
+    :param device: final device to load models to
+    :param model_type: loads custom model type
+    :param entity: root wandb path
+    :param project: wandb project name
+    '''
+    base = "../models"
+
+    if model_type == "channel":
+        cache_dir = os.path.join(base, "channel_models", run_name)
+        final_name = "channel_model_final.pth"
+    elif model_type == "encoder_decoder":
+        cache_dir = os.path.join(base, "encoder_decoders", run_name)
+        final_name = "time_autoencoder.pth"
+    else:
+        raise ValueError("Unknown model_type")
+
+    os.makedirs(cache_dir, exist_ok=True)
+    cached_model_path = os.path.join(cache_dir, final_name)
+    cached_cfg_path = os.path.join(cache_dir, "config.json")
+
+    if os.path.exists(cached_model_path) and os.path.exists(cached_cfg_path):
+        with open(cached_cfg_path, "r") as f:
+            cfg = json.load(f)
+
+        if model_type == "channel":
+            model = TCN_channel(
+                nlayers=cfg["nlayers"],
+                dilation_base=cfg["dilation_base"],
+                num_taps=cfg["num_taps"],
+                hidden_channels=cfg["hidden_channels"],
+                learn_noise=cfg["learn_noise"],
+                gaussian=cfg["gaussian"]
+            )
+            weights = torch.load(cached_model_path, map_location="cpu")
+            model.load_state_dict(weights["channel_model"])
+            return model.to(device)
+
+        if model_type == "encoder_decoder":
+            encoder = TCN(
+                nlayers=cfg["nlayers"],
+                dilation_base=cfg["dilation_base"],
+                num_taps=cfg["num_taps"],
+                hidden_channels=cfg["hidden_channels"]
+            )
+            decoder = TCN(
+                nlayers=cfg["nlayers"],
+                dilation_base=cfg["dilation_base"],
+                num_taps=cfg["num_taps"],
+                hidden_channels=cfg["hidden_channels"]
+            )
+            weights = torch.load(cached_model_path, map_location="cpu")
+            encoder.load_state_dict(weights["time_encoder"])
+            decoder.load_state_dict(weights["time_decoder"])
+            return encoder.to(device), decoder.to(device)
 
     api = wandb.Api()
     runs = api.runs(f"{entity}/{project}", filters={"display_name": run_name})
@@ -346,22 +407,27 @@ def load_runs_final_artifact(run_name,
                 target_art = a
                 break
         assert target_art is not None
-
         artifact_dir = target_art.download()
-        logging_run = target_art.logged_by()
-        cfg = logging_run.config
+        run_cfg = target_art.logged_by().config
 
+        # Save config locally for future offline use
+        with open(cached_cfg_path, "w") as g:
+            json.dump(dict(run_cfg), g)
+
+        # Copy the final .pth file into cache
+        downloaded_pth = os.path.join(artifact_dir, "channel_model_final.pth")
+        torch.save(torch.load(downloaded_pth, map_location="cpu"), cached_model_path)
+
+        # Load model
         model = TCN_channel(
-            nlayers=cfg["nlayers"],
-            dilation_base=cfg["dilation_base"],
-            num_taps=cfg["num_taps"],
-            hidden_channels=cfg["hidden_channels"],
-            learn_noise=cfg["learn_noise"],
-            gaussian=cfg["gaussian"]
+            nlayers=run_cfg["nlayers"],
+            dilation_base=run_cfg["dilation_base"],
+            num_taps=run_cfg["num_taps"],
+            hidden_channels=run_cfg["hidden_channels"],
+            learn_noise=run_cfg["learn_noise"],
+            gaussian=run_cfg["gaussian"]
         )
-
-        path = os.path.join(artifact_dir, "channel_model_final.pth")
-        weights = torch.load(path, map_location="cpu")
+        weights = torch.load(cached_model_path, map_location="cpu")
         model.load_state_dict(weights["channel_model"])
         return model.to(device)
 
@@ -371,28 +437,31 @@ def load_runs_final_artifact(run_name,
                 target_art = a
                 break
         assert target_art is not None
-
         artifact_dir = target_art.download()
-        logging_run = target_art.logged_by()
-        cfg = logging_run.config
+        run_cfg = target_art.logged_by().config
 
+        # Save config
+        with open(cached_cfg_path, "w") as g:
+            json.dump(dict(run_cfg), g)
+
+        downloaded_pth = os.path.join(artifact_dir, "time_autoencoder.pth")
+        torch.save(torch.load(downloaded_pth, map_location="cpu"), cached_model_path)
+
+        # Load model
         encoder = TCN(
-            nlayers=cfg["nlayers"],
-            dilation_base=cfg["dilation_base"],
-            num_taps=cfg["num_taps"],
-            hidden_channels=cfg["hidden_channels"],
+            nlayers=run_cfg["nlayers"],
+            dilation_base=run_cfg["dilation_base"],
+            num_taps=run_cfg["num_taps"],
+            hidden_channels=run_cfg["hidden_channels"]
         )
-
         decoder = TCN(
-            nlayers=cfg["nlayers"],
-            dilation_base=cfg["dilation_base"],
-            num_taps=cfg["num_taps"],
-            hidden_channels=cfg["hidden_channels"],
+            nlayers=run_cfg["nlayers"],
+            dilation_base=run_cfg["dilation_base"],
+            num_taps=run_cfg["num_taps"],
+            hidden_channels=run_cfg["hidden_channels"]
         )
 
-        ae_path = os.path.join(artifact_dir, "time_autoencoder.pth")
-        weights = torch.load(ae_path, map_location="cpu")
-
+        weights = torch.load(cached_model_path, map_location="cpu")
         encoder.load_state_dict(weights["time_encoder"])
         decoder.load_state_dict(weights["time_decoder"])
 

@@ -9,6 +9,5 @@ debug_logs/*
 experiments/*
 *.pyc
 wandb*
-saved_models/*
 *.yml
 !notebooks/*.ipynb
