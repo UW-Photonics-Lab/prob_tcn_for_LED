@@ -9,6 +9,8 @@ import matplotlib.pyplot as plt
 import wandb
 import torch.optim as optim
 import torch.nn.functional as F
+import sys
+from modules.models import TCN_channel, TCN
 
 @dataclass
 class OFDM_channel:
@@ -324,3 +326,76 @@ def calculate_BER(received_symbols, true_bits, constellation):
 def evm_loss(true_symbols, predicted_symbols):
     return torch.mean(torch.abs(true_symbols - predicted_symbols) ** 2)
 
+def load_runs_final_artifact(run_name,
+                             device,
+                             model_type="channel",
+                             entity="dylanbackprops-university-of-washington",
+                             project="mldrivenpeled"):
+
+    api = wandb.Api()
+    runs = api.runs(f"{entity}/{project}", filters={"display_name": run_name})
+    assert len(runs) > 0
+    run = runs[0]
+
+    arts = list(run.logged_artifacts())
+    target_art = None
+
+    if model_type == "channel":
+        for a in arts:
+            if "channel_model" in a.name or "channel" in a.name:
+                target_art = a
+                break
+        assert target_art is not None
+
+        artifact_dir = target_art.download()
+        logging_run = target_art.logged_by()
+        cfg = logging_run.config
+
+        model = TCN_channel(
+            nlayers=cfg["nlayers"],
+            dilation_base=cfg["dilation_base"],
+            num_taps=cfg["num_taps"],
+            hidden_channels=cfg["hidden_channels"],
+            learn_noise=cfg["learn_noise"],
+            gaussian=cfg["gaussian"]
+        )
+
+        path = os.path.join(artifact_dir, "channel_model_final.pth")
+        weights = torch.load(path, map_location="cpu")
+        model.load_state_dict(weights["channel_model"])
+        return model.to(device)
+
+    if model_type == "encoder_decoder":
+        for a in arts:
+            if "time_autoencoder" in a.name or "autoencoder" in a.name:
+                target_art = a
+                break
+        assert target_art is not None
+
+        artifact_dir = target_art.download()
+        logging_run = target_art.logged_by()
+        cfg = logging_run.config
+
+        encoder = TCN(
+            nlayers=cfg["nlayers"],
+            dilation_base=cfg["dilation_base"],
+            num_taps=cfg["num_taps"],
+            hidden_channels=cfg["hidden_channels"],
+        )
+
+        decoder = TCN(
+            nlayers=cfg["nlayers"],
+            dilation_base=cfg["dilation_base"],
+            num_taps=cfg["num_taps"],
+            hidden_channels=cfg["hidden_channels"],
+        )
+
+        ae_path = os.path.join(artifact_dir, "time_autoencoder.pth")
+        weights = torch.load(ae_path, map_location="cpu")
+
+        encoder.load_state_dict(weights["time_encoder"])
+        decoder.load_state_dict(weights["time_decoder"])
+
+        return encoder.to(device), decoder.to(device)
+
+    raise ValueError("Unknown model_type")
