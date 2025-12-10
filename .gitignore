@@ -4,7 +4,6 @@ scripts/__pycache__
 notebooks/*
 .vscode/*
 data/*
-models/*
 debug_logs/*
 experiments/*
 *.pyc
