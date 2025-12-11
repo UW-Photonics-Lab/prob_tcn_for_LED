@@ -10,3 +10,5 @@ experiments/*
 wandb*
 *.yml
 !notebooks/*.ipynb
+notebooks/old*
+models/pickled_models/*

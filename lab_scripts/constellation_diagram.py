@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from abc import ABC, abstractmethod
-
+import os
 class ConstellationDiagram(ABC):
 
     def __init__(self, complex_symbols: np.array):
@@ -142,12 +142,14 @@ class RingShapedConstellation(ConstellationDiagram):
         plt.show()
 
 def get_constellation(mode: str):
-        if mode == "qpsk":
-            constellation = QPSK_Constellation()
-        elif mode == "m5_apsk_constellation":
-            constellation = RingShapedConstellation(filename='../lab_scripts/saved_constellations/m5_apsk_constellation.npy')
-        elif mode == "m6_apsk_constellation":
-            constellation = RingShapedConstellation(filename='../lab_scripts/saved_constellations/m6_apsk_constellation.npy')
-        elif mode == "m7_apsk_constellation":
-            constellation = RingShapedConstellation(filename='../lab_scripts/saved_constellations/m7_apsk_constellation.npy')
-        return constellation
+    PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    base = os.path.join(PROJECT_ROOT, "modules", "saved_constellations")
+    if mode == "qpsk":
+        constellation = QPSK_Constellation()
+    if mode == "m5_apsk_constellation":
+        return RingShapedConstellation(filename=os.path.join(base, "m5_apsk_constellation.npy"))
+    if mode == "m6_apsk_constellation":
+        return RingShapedConstellation(filename=os.path.join(base, "m6_apsk_constellation.npy"))
+    if mode == "m7_apsk_constellation":
+        return RingShapedConstellation(filename=os.path.join(base, "m7_apsk_constellation.npy"))
+    return None
