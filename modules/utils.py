@@ -490,7 +490,7 @@ def save_validation_data(
 
     sent = to_numpy(sent).astype(np.complex64)
     received = to_numpy(received).astype(np.complex64)
-    freqs = to_numpy(freqs).astype(np.float32)
+    freqs = to_numpy(freqs).astype(np.float64)
 
     time_encoder_in = to_numpy(time_encoder_in).astype(np.float32)
     time_encoder_out = to_numpy(time_encoder_out).astype(np.float32)
@@ -503,13 +503,13 @@ def save_validation_data(
         time_stamp = int(time.time())
         grp = f.create_group(f"frame_{time_stamp}", overwrite=False)
 
-        grp.create_array("sent", sent, compressor="default", chunks=True)
-        grp.create_array("received", received, compressor="default", chunks=True)
-        grp.create_array("freqs", freqs, compressor="default", chunks=True)
-        grp.create_array("time_encoder_in", time_encoder_in, compressor="default", chunks=True)
-        grp.create_array("time_encoder_out", time_encoder_out, compressor="default", chunks=True)
-        grp.create_array("time_decoder_in", time_decoder_in, compressor="default", chunks=True)
-        grp.create_array("time_decoder_out", time_decoder_out, compressor="default", chunks=True)
+        grp.create_dataset("sent", data=sent)
+        grp.create_dataset("received", data=received)
+        grp.create_dataset("freqs", data=freqs)
+        grp.create_dataset("time_encoder_in", data=time_encoder_in)
+        grp.create_dataset("time_encoder_out", data=time_encoder_out)
+        grp.create_dataset("time_decoder_in", data=time_decoder_in)
+        grp.create_dataset("time_decoder_out", data=time_decoder_out)
 
         if metadata is not None:
             for k, v in metadata.items():

@@ -36,10 +36,10 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 from lab_scripts.logging_code import *
 decode_logger = setup_logger(log_file=r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\test3.txt")
 
-STATE['validate_model'] = False # Variable
+STATE['validate_model'] = True # Variable
 STATE['normalize_power'] = False
 
-load_model = False # Variable
+load_model = True # Variable
 LOAD_DIR = ""
 if load_model:
     model_name = "cerulean-frog-8021" # Variable
@@ -48,16 +48,16 @@ if load_model:
     with open(os.path.join(LOAD_DIR, "config.json"), "r") as f:
         hyperparams = json.load(f)
 
+    # Start Weights and Biases session
+    wandb.init(project="mldrivenpeled",
+            config=hyperparams)
+    config = wandb.config
+
     print(f"WandB run info:")
     print(f"  Name: {wandb.run.name}")
     print(f"  ID: {wandb.run.id}")
     print(f"  URL: {wandb.run.url}")
     print("Chosen hyperparameters for this session:")
-
-    # Start Weights and Biases session
-    wandb.init(project="mldrivenpeled",
-            config=hyperparams)
-    config = wandb.config
 
 if load_model and STATE['validate_model']:
     wandb.run.tags = list(wandb.run.tags) + ["validate"]
@@ -842,17 +842,17 @@ def append_symbol_frame(
 
         time_stamp = int(time.time())
         group_name = f"frame_{time_stamp}"
-        grp = f.create_group(group_name, overwrite=False)
-        grp.create_array("sent", sent, compressor="default", chunks=True)
-        grp.create_array("received", received, compressor="default", chunks=True)
-        grp.create_array("freqs", freqs, compressor="default", chunks=True)
+        grp = f.create_group(group_name)
+        grp.create_dataset("sent", data=sent)
+        grp.create_dataset("received", data=received)
+        grp.create_dataset("freqs", data=freqs)
         
         if received_time is not None:
             cp_length = STATE['cp_length']
             num_points_symbol = STATE['num_points_symbol']
             grp.attrs["num_points_symbol"] = num_points_symbol
             grp.attrs["cp_length"] = cp_length
-            grp.create_array(
+            grp.create_dataset(
                 "received_time",
                 received_time.astype(np.float32),
                 compressor="default",
@@ -860,13 +860,12 @@ def append_symbol_frame(
             )
 
         if sent_time is not None:
-            grp.create_array(
+            grp.create_dataset(
                 "sent_time",
                 received_time.astype(np.float32),
                 compressor="default",
                 chunks=True         
             )
-
        
         # Store metadata if provided
         if metadata:
