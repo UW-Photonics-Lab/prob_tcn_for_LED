@@ -54,6 +54,10 @@ def symbols_to_time(X,
         x_time = torch.clip(x_time, min=negative_rail, max=positive_rail)
         return x_time.to(device)
 
+def calculate_rmse_pct_loss(y, y_pred):
+    r = y - y_pred
+    return (torch.sqrt(torch.mean(r ** 2) / torch.mean(y ** 2)) * 100).item()
+
 def extract_zarr_data(file_path, device, delay=None):
     o_sets = OFDM_channel()
     cache_path = file_path.replace(".zarr", "_cached.pt").replace(".h5", "_cached.pt")
@@ -336,7 +340,7 @@ def load_runs_final_artifact(
 ):
     '''
     Loads checkpoint from local path if available, otherwise queries wandb API
-    
+
     :param run_name: name for cache directory of wandb run name
     :param device: final device to load models to
     :param model_type: loads custom model type

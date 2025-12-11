@@ -254,7 +254,6 @@ class memory_polynomial_channel(nn.Module):
         Y_flat = Y.flatten()
 
         weights, residuals, rank, s = torch.linalg.lstsq(A, Y_flat)
-        # print("Solved Weights:", weights)
         y_pred = A @ weights
         # Reshape back to (B, T) for analysis
         B, T = X.shape
