@@ -36,7 +36,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 from lab_scripts.logging_code import *
 decode_logger = setup_logger(log_file=r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\test3.txt")
 
-STATE['validate_model'] = True # Variable
+STATE['validate_model'] = False # Variable
 STATE['normalize_power'] = False
 
 load_model = True # Variable
@@ -854,17 +854,13 @@ def append_symbol_frame(
             grp.attrs["cp_length"] = cp_length
             grp.create_dataset(
                 "received_time",
-                received_time.astype(np.float32),
-                compressor="default",
-                chunks=True         
+                data=received_time.astype(np.float32)   
             )
 
         if sent_time is not None:
             grp.create_dataset(
                 "sent_time",
-                received_time.astype(np.float32),
-                compressor="default",
-                chunks=True         
+                data=received_time.astype(np.float32),       
             )
        
         # Store metadata if provided
