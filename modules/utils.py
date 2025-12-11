@@ -10,6 +10,7 @@ import wandb
 import torch.optim as optim
 import torch.nn.functional as F
 import sys
+import time
 import json
 from modules.models import TCN_channel, TCN
 
@@ -175,7 +176,6 @@ def log_snr_plots(y_preds, noisy_y_preds, ofdm_settings):
     wandb.log({"SNR_Frequency": wandb.Image(fig)})
     plt.close(fig)
 
-
 def make_optimizer(mode, channel_model, noise_model, config):
     if mode == "channel_only":
         return optim.AdamW(
@@ -200,7 +200,6 @@ def make_optimizer(mode, channel_model, noise_model, config):
         )
     else:
         raise ValueError("Unknown mode")
-
 
 def make_time_validate_plots(enc_in, enc_out, dec_in, dec_out,
                              frame_BER, run_model, step=0, zoom_samples=200):
@@ -262,7 +261,6 @@ def make_time_validate_plots(enc_in, enc_out, dec_in, dec_out,
     wandb.log({f"{prefix}time_signals": wandb.Image(fig)}, step=step)
     plt.close(fig)
 
-
 def in_band_filter(x, ks_indices, nfft):
     mask = torch.zeros(nfft, device=x.device)
     neg_ks_indices = nfft - ks_indices
@@ -273,7 +271,6 @@ def in_band_filter(x, ks_indices, nfft):
     h = impulse_response.view(1, 1, -1)
     filtered_x = F.conv1d(x.unsqueeze(1), h, padding='same').squeeze(1)
     return filtered_x
-
 
 def in_band_time_loss(sent_time, decoded_time, ks_indices, n_fft, num_taps):
     """Compute in-band loss directly in time domain using filtering"""
@@ -295,7 +292,7 @@ def in_band_time_loss(sent_time, decoded_time, ks_indices, n_fft, num_taps):
     loss = torch.mean((sent_filtered[:, num_taps:] - decoded_filtered[:, num_taps:]).pow(2))
     return loss
 
-def calculate_BER(received_symbols, true_bits, constellation):
+def calculate_BER(received_symbols, true_bits, constellation, return_decided_bits=False):
     # Demap symbols to bits
     constellation_symbols = torch.tensor(
         list(constellation._symbols_to_bits_map.keys()),
@@ -322,6 +319,9 @@ def calculate_BER(received_symbols, true_bits, constellation):
 
     # Calculate BER
     BER = float(np.sum(true_bits_array != decided_bits_flat_array) / len(true_bits_array))
+
+    if return_decided_bits:
+        return BER, decided_bits_flat
     return BER
 
 def evm_loss(true_symbols, predicted_symbols):
@@ -468,3 +468,50 @@ def load_runs_final_artifact(
         return encoder.to(device), decoder.to(device)
 
     raise ValueError("Unknown model_type")
+
+
+def save_validation_data(
+    sent, received, freqs,
+    time_encoder_in,
+    time_encoder_out,
+    time_decoder_in,
+    time_decoder_out,
+    zarr_path=r"example.zarr",
+    metadata: dict = None,
+):
+
+
+    def to_numpy(x):
+        return x.detach().cpu().numpy() if isinstance(x, torch.Tensor) else x
+
+    sent = to_numpy(sent).astype(np.complex64)
+    received = to_numpy(received).astype(np.complex64)
+    freqs = to_numpy(freqs).astype(np.float32)
+
+    time_encoder_in = to_numpy(time_encoder_in).astype(np.float32)
+    time_encoder_out = to_numpy(time_encoder_out).astype(np.float32)
+    time_decoder_in = to_numpy(time_decoder_in).astype(np.float32)
+    time_decoder_out = to_numpy(time_decoder_out).astype(np.float32)
+
+    try:
+
+        f = zarr.open(zarr_path, mode='a')
+        time_stamp = int(time.time())
+        grp = f.create_group(f"frame_{time_stamp}", overwrite=False)
+
+        grp.create_array("sent", sent, compressor="default", chunks=True)
+        grp.create_array("received", received, compressor="default", chunks=True)
+        grp.create_array("freqs", freqs, compressor="default", chunks=True)
+        grp.create_array("time_encoder_in", time_encoder_in, compressor="default", chunks=True)
+        grp.create_array("time_encoder_out", time_encoder_out, compressor="default", chunks=True)
+        grp.create_array("time_decoder_in", time_decoder_in, compressor="default", chunks=True)
+        grp.create_array("time_decoder_out", time_decoder_out, compressor="default", chunks=True)
+
+        if metadata is not None:
+            for k, v in metadata.items():
+                grp.attrs[k] = v
+
+    except Exception as e:
+        return None
+
+    return time_stamp
