@@ -336,18 +336,14 @@ def load_runs_final_artifact(
     device,
     model_type="channel",
     entity="dylanbackprops-university-of-washington",
-    project="mldrivenpeled"
+    project="mldrivenpeled",
+    root_dir=None
 ):
-    '''
-    Loads checkpoint from local path if available, otherwise queries wandb API
-
-    :param run_name: name for cache directory of wandb run name
-    :param device: final device to load models to
-    :param model_type: loads custom model type
-    :param entity: root wandb path
-    :param project: wandb project name
-    '''
-    base = "../models"
+    
+    if root_dir is None:
+        base = "../models"
+    else:
+        base = os.path.join(root_dir, "models")
 
     if model_type == "channel":
         cache_dir = os.path.join(base, "channel_models", run_name)
@@ -359,120 +355,69 @@ def load_runs_final_artifact(
         raise ValueError("Unknown model_type")
 
     os.makedirs(cache_dir, exist_ok=True)
-    cached_model_path = os.path.join(cache_dir, final_name)
-    cached_cfg_path = os.path.join(cache_dir, "config.json")
+    local_weights_path = os.path.join(cache_dir, final_name)
+    local_config_path = os.path.join(cache_dir, "config.json")
 
-    if os.path.exists(cached_model_path) and os.path.exists(cached_cfg_path):
-        with open(cached_cfg_path, "r") as f:
-            cfg = json.load(f)
+    if not (os.path.exists(local_weights_path) and os.path.exists(local_config_path)):
+        print(f"Artifact not found locally. Downloading run '{run_name}'...")
+        
+        api = wandb.Api()
+        runs = api.runs(f"{entity}/{project}", filters={"display_name": run_name})
+        assert len(runs) > 0, f"Run '{run_name}' not found on W&B."
+        run = runs[0]
 
-        if model_type == "channel":
-            model = TCN_channel(
-                nlayers=cfg["nlayers"],
-                dilation_base=cfg["dilation_base"],
-                num_taps=cfg["num_taps"],
-                hidden_channels=cfg["hidden_channels"],
-                learn_noise=cfg["learn_noise"],
-                gaussian=cfg["gaussian"]
-            )
-            weights = torch.load(cached_model_path, map_location="cpu")
-            model.load_state_dict(weights["channel_model"])
-            return model.to(device)
+        target_art = None
+        # Keyword matching to find the right artifact
+        keyword = "channel" if model_type == "channel" else "autoencoder"
+        
+        for a in run.logged_artifacts():
+            if keyword in a.name:
+                target_art = a
+                break
+        
+        assert target_art is not None, f"Artifact with keyword '{keyword}' not found."
+        target_art.download(root=cache_dir)
+        
+        # Save config locally
+        run_cfg = target_art.logged_by().config
+        with open(local_config_path, "w") as g:
+            json.dump(dict(run_cfg), g)
 
-        if model_type == "encoder_decoder":
-            encoder = TCN(
-                nlayers=cfg["nlayers"],
-                dilation_base=cfg["dilation_base"],
-                num_taps=cfg["num_taps"],
-                hidden_channels=cfg["hidden_channels"]
-            )
-            decoder = TCN(
-                nlayers=cfg["nlayers"],
-                dilation_base=cfg["dilation_base"],
-                num_taps=cfg["num_taps"],
-                hidden_channels=cfg["hidden_channels"]
-            )
-            weights = torch.load(cached_model_path, map_location="cpu")
-            encoder.load_state_dict(weights["time_encoder"])
-            decoder.load_state_dict(weights["time_decoder"])
-            return encoder.to(device), decoder.to(device)
-
-    api = wandb.Api()
-    runs = api.runs(f"{entity}/{project}", filters={"display_name": run_name})
-    assert len(runs) > 0
-    run = runs[0]
-
-    arts = list(run.logged_artifacts())
-    target_art = None
+    print(f"Loading from {local_weights_path}")
+    
+    with open(local_config_path, "r") as f:
+        cfg = json.load(f)
+    
+    weights = torch.load(local_weights_path, map_location="cpu")
 
     if model_type == "channel":
-        for a in arts:
-            if "channel_model" in a.name or "channel" in a.name:
-                target_art = a
-                break
-        assert target_art is not None
-        artifact_dir = target_art.download()
-        run_cfg = target_art.logged_by().config
-
-        # Save config locally for future offline use
-        with open(cached_cfg_path, "w") as g:
-            json.dump(dict(run_cfg), g)
-
-        # Copy the final .pth file into cache
-        downloaded_pth = os.path.join(artifact_dir, "channel_model_final.pth")
-        torch.save(torch.load(downloaded_pth, map_location="cpu"), cached_model_path)
-
-        # Load model
         model = TCN_channel(
-            nlayers=run_cfg["nlayers"],
-            dilation_base=run_cfg["dilation_base"],
-            num_taps=run_cfg["num_taps"],
-            hidden_channels=run_cfg["hidden_channels"],
-            learn_noise=run_cfg["learn_noise"],
-            gaussian=run_cfg["gaussian"]
+            nlayers=cfg["nlayers"],
+            dilation_base=cfg["dilation_base"],
+            num_taps=cfg["num_taps"],
+            hidden_channels=cfg["hidden_channels"],
+            learn_noise=cfg.get("learn_noise", False), # .get() handles older configs safely
+            gaussian=cfg.get("gaussian", True)
         )
-        weights = torch.load(cached_model_path, map_location="cpu")
         model.load_state_dict(weights["channel_model"])
-        return model.to(device)
+        return model.to(device), cfg
 
-    if model_type == "encoder_decoder":
-        for a in arts:
-            if "time_autoencoder" in a.name or "autoencoder" in a.name:
-                target_art = a
-                break
-        assert target_art is not None
-        artifact_dir = target_art.download()
-        run_cfg = target_art.logged_by().config
-
-        # Save config
-        with open(cached_cfg_path, "w") as g:
-            json.dump(dict(run_cfg), g)
-
-        downloaded_pth = os.path.join(artifact_dir, "time_autoencoder.pth")
-        torch.save(torch.load(downloaded_pth, map_location="cpu"), cached_model_path)
-
-        # Load model
+    elif model_type == "encoder_decoder":
         encoder = TCN(
-            nlayers=run_cfg["nlayers"],
-            dilation_base=run_cfg["dilation_base"],
-            num_taps=run_cfg["num_taps"],
-            hidden_channels=run_cfg["hidden_channels"]
+            nlayers=cfg["nlayers"],
+            dilation_base=cfg["dilation_base"],
+            num_taps=cfg["num_taps"],
+            hidden_channels=cfg["hidden_channels"]
         )
         decoder = TCN(
-            nlayers=run_cfg["nlayers"],
-            dilation_base=run_cfg["dilation_base"],
-            num_taps=run_cfg["num_taps"],
-            hidden_channels=run_cfg["hidden_channels"]
+            nlayers=cfg["nlayers"],
+            dilation_base=cfg["dilation_base"],
+            num_taps=cfg["num_taps"],
+            hidden_channels=cfg["hidden_channels"]
         )
-
-        weights = torch.load(cached_model_path, map_location="cpu")
         encoder.load_state_dict(weights["time_encoder"])
         decoder.load_state_dict(weights["time_decoder"])
-
-        return encoder.to(device), decoder.to(device)
-
-    raise ValueError("Unknown model_type")
-
+        return encoder.to(device), decoder.to(device), cfg
 
 def save_validation_data(
     sent, received, freqs,

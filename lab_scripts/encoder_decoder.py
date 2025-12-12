@@ -28,25 +28,27 @@ from transformers import get_linear_schedule_with_warmup
 import traceback
 from lab_scripts.constellation_diagram import QPSK_Constellation, get_constellation, RingShapedConstellation
 from modules.models import TCN
-from modules.utils import evm_loss
+from modules.utils import evm_loss, load_runs_final_artifact
 import torch.nn.functional as F
 from scipy.signal import resample_poly
 import random
 script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(script_dir, ".."))
 from lab_scripts.logging_code import *
 decode_logger = setup_logger(log_file=r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\test3.txt")
 
-STATE['validate_model'] = False # Variable
+STATE['validate_model'] = True # Variable
 STATE['normalize_power'] = False
 
 load_model = True # Variable
 LOAD_DIR = ""
 if load_model:
-    model_name = "cerulean-frog-8021" # Variable
-    base_dir = r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\models\pickled_models"
-    LOAD_DIR = os.path.join(base_dir, model_name)
-    with open(os.path.join(LOAD_DIR, "config.json"), "r") as f:
-        hyperparams = json.load(f)
+    model_name = "clear-disco-8071" # Variable
+    STATE['encoder'], STATE['decoder'], hyperparams = load_runs_final_artifact(model_name, device=torch.device('cpu'), model_type="encoder_decoder", root_dir=project_root)
+    # base_dir = r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\models\pickled_models"
+    # LOAD_DIR = os.path.join(base_dir, model_name)
+    # with open(os.path.join(LOAD_DIR, "config.json"), "r") as f:
+    #     hyperparams = json.load(f)
 
     # Start Weights and Biases session
     wandb.init(project="mldrivenpeled",
@@ -81,30 +83,30 @@ STATE['predicted_received_symbols'] = []
 STATE['encoder_out_buffer'] = []
 STATE['decoder_in_buffer'] = []
 
-if load_model:
-    with open(os.path.join(LOAD_DIR, "config.json"), "r") as f:
-        remote_config = json.load(f)
-        encoder = TCN(
-            nlayers=remote_config['nlayers'],
-            dilation_base=remote_config['dilation_base'],
-            num_taps=remote_config['num_taps'],
-            hidden_channels=remote_config['hidden_channels']
-        )
-        encoder.load_state_dict(torch.load(os.path.join(LOAD_DIR, "encoder_weights.pth")))
-        encoder.eval()
+# if load_model:
+#     with open(os.path.join(LOAD_DIR, "config.json"), "r") as f:
+#         remote_config = json.load(f)
+#         encoder = TCN(
+#             nlayers=remote_config['nlayers'],
+#             dilation_base=remote_config['dilation_base'],
+#             num_taps=remote_config['num_taps'],
+#             hidden_channels=remote_config['hidden_channels']
+#         )
+#         encoder.load_state_dict(torch.load(os.path.join(LOAD_DIR, "encoder_weights.pth")))
+#         encoder.eval()
 
-        decoder = TCN(
-            nlayers=remote_config['nlayers'],
-            dilation_base=remote_config['dilation_base'],
-            num_taps=remote_config['num_taps'],
-            hidden_channels=remote_config['hidden_channels'],
-        )
-        decoder.load_state_dict(torch.load(os.path.join(LOAD_DIR, "decoder_weights.pth")))
-        decoder.eval()
+#         decoder = TCN(
+#             nlayers=remote_config['nlayers'],
+#             dilation_base=remote_config['dilation_base'],
+#             num_taps=remote_config['num_taps'],
+#             hidden_channels=remote_config['hidden_channels'],
+#         )
+#         decoder.load_state_dict(torch.load(os.path.join(LOAD_DIR, "decoder_weights.pth")))
+#         decoder.eval()
 
-        # Add these models to STATE to pass information among scripts
-        STATE['encoder'] = encoder
-        STATE['decoder'] = decoder
+#         # Add these models to STATE to pass information among scripts
+#         STATE['encoder'] = encoder
+#         STATE['decoder'] = decoder
 
 def add_noise(signal, SNR):
     signal_power = signal.abs().pow(2).mean()
@@ -392,7 +394,7 @@ def gather_data_RY(real, imag):
         None, # No sent time
         STATE['last_time_symbol_received'],
         STATE['frequencies'],
-        zarr_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\channel_3e5-7.6MHz_2.66.V_0.126A_scale2_dynamic_power_0.5-3_v2.zarr")
+        zarr_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\channel_3e5-7.6MHz_2.68.V_0.125A_scale2_dynamic_power_0.5-3_v2.zarr")
     STATE['decoder_out'] = out
     out = out.flatten() # Must flatten along batch dimension to output from labview
     return out.real.detach().cpu().contiguous().numpy().tolist(), out.imag.detach().cpu().contiguous().numpy().tolist()
