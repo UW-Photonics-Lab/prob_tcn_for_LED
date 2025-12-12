@@ -145,7 +145,7 @@ def get_constellation(mode: str):
     PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     base = os.path.join(PROJECT_ROOT, "modules", "saved_constellations")
     if mode == "qpsk":
-        constellation = QPSK_Constellation()
+        return QPSK_Constellation()
     if mode == "m5_apsk_constellation":
         return RingShapedConstellation(filename=os.path.join(base, "m5_apsk_constellation.npy"))
     if mode == "m6_apsk_constellation":
