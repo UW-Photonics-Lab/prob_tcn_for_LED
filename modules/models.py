@@ -122,7 +122,7 @@ class TCN_channel(nn.Module):
         if self.gaussian:
             z = torch.randn_like(mean_out)
             noisy_out = mean_out + std_out * z
-            nu_out = torch.zeros_like(mean_out)
+            nu_out = torch.full_like(mean_out, float('inf')) # nu = inf for Gaussian
         else:
             if xin.device.type == "mps":
                 noisy_out = self.sample_student_t_mps(mean_out, std_out, nu_out)
