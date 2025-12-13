@@ -215,6 +215,8 @@ class memory_polynomial_channel(nn.Module):
         return terms, weights
 
     def calculate_err(self, X, Y, plot=False):
+        X = X.to(torch.device("cpu")) # will crash cuda memory otherwise
+        Y = Y.to(torch.device("cpu"))
         A = self._create_regressors(X)
         Q, R = torch.linalg.qr(A, mode='reduced')
         b = Y.flatten()
