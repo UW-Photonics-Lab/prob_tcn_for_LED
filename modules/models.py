@@ -151,6 +151,7 @@ class memory_polynomial_channel(nn.Module):
         self.memory_linear = memory_linear
         self.memory_nonlinear = memory_nonlinear
         self.nonlinearity_order = nonlinearity_order
+        self.device = device
 
     def _create_regressors(self, X):
         B, T = X.shape
@@ -176,7 +177,7 @@ class memory_polynomial_channel(nn.Module):
         stack = torch.stack(batched_regressor_cols) # [features, B, T]
         stack = stack.permute(1, 2, 0) # [B, T, freatures]
         A = stack.reshape(regressor_length, num_regressors)
-        return A
+        return A.to(self.device)
 
     def show_terms(self, plot=False):
         weights = self.weights.detach().cpu()
@@ -255,14 +256,14 @@ class memory_polynomial_channel(nn.Module):
         A = self._create_regressors(X)
         Y_flat = Y.flatten()
 
-        weights, residuals, rank, s = torch.linalg.lstsq(A, Y_flat)
+        weights, residuals, rank, s = torch.linalg.lstsq(A, Y_flat, driver='gels')
         y_pred = A @ weights
         # Reshape back to (B, T) for analysis
         B, T = X.shape
         y_pred = y_pred.reshape(B, T)
         residuals = Y - y_pred
-        self.weights = weights
-        return weights, A, residuals
+        self.weights = weights.to(self.device)
+        return weights, A, residuals.to(self.device)
 
     def forward(self, X):
         A_x = self._create_regressors(X)
