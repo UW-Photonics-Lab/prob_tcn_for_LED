@@ -296,6 +296,9 @@ def in_band_time_loss(sent_time, decoded_time, ks_indices, n_fft, num_taps):
     loss = torch.mean((sent_filtered[:, num_taps:] - decoded_filtered[:, num_taps:]).pow(2))
     return loss
 
+def calculate_AIC(nll, num_params, num_data_points):
+    return 2 * num_params + 2 * nll * num_data_points # Average NLL times number of data points evaluated
+
 def calculate_BER(received_symbols, true_bits, constellation, return_decided_bits=False):
     # Demap symbols to bits
     constellation_symbols = torch.tensor(
@@ -464,3 +467,79 @@ def save_validation_data(
         return None
 
     return time_stamp
+
+
+def correlation(x: torch.Tensor, y: torch.Tensor, lag_max: int) -> torch.Tensor:
+    '''
+    Computes batched and normalized correlation between x and y [B, N] up to lag_max times
+    '''
+    x_centered = x - x.mean(dim=-1, keepdims=True)
+    y_centered = y - y.mean(dim=-1, keepdims=True)
+    cross_corrs = []
+    N = x_centered.shape[1]
+    assert lag_max <= N, "Lag max too long"
+    x_rms = torch.sqrt((1 / N) * torch.sum(x_centered ** 2, dim=-1, keepdims=True))
+    y_rms = torch.sqrt((1 / N) * torch.sum(y_centered ** 2, dim=-1, keepdims=True))
+    for lag in range(-lag_max, lag_max+1):
+        if lag >= 0:
+            shifted_x = x_centered[:, :N-lag]
+            shifted_y = y_centered[:, lag:]
+        else:
+            shifted_x = x_centered[:, -lag:]
+            shifted_y = y_centered[:, :N+lag]
+
+        corr = torch.mean(shifted_x * shifted_y, dim=-1, keepdims=True)
+        corr_norm = torch.mean(corr / (x_rms * y_rms), dim=0) # Average across batches
+        cross_corrs.append(corr_norm)
+    return torch.stack(cross_corrs, dim=0)
+
+def compute_billings_corrs(batched_residuals: torch.Tensor, batched_inputs: torch.Tensor,
+                           lag_max: int, log_wandb: bool = False, prefix: str = "billings_correlation"):
+    '''
+    Computs the Billing's et al correlation parameters to determine whether a model
+    has captured the system's nonlinearity
+
+    Args:
+        batched_residuals: model errors of shape [B, N]
+        batched_inputs: model inputs of shape [B, N]
+    '''
+
+
+    batched_residuals = batched_residuals - batched_residuals.mean(dim=-1, keepdim=True)
+    batched_inputs = batched_inputs - batched_inputs.mean(dim=-1, keepdim=True)
+
+    def _plot_and_log(y_np, title, key, lags):
+        fig, ax = plt.subplots(figsize=(6, 3.5))
+        ax.plot(lags, y_np.ravel(), label=key)
+        ax.hlines(confidence_value, lags[0], lags[-1], colors='r', linestyles='dashed', label="95% CI")
+        ax.hlines(-confidence_value, lags[0], lags[-1], colors='r', linestyles='dashed')
+        ax.set_title(title)
+        ax.set_xlabel("Lag")
+        ax.set_ylabel("Correlation")
+        ax.legend()
+        plt.tight_layout()
+
+        if log_wandb:
+            wandb.log({f"{prefix}/{key}": wandb.Image(fig)})
+        else:
+            plt.show()
+        plt.close(fig)
+
+    confidence_value = 1.96 / np.sqrt(batched_residuals.shape[1])
+    lags = np.arange(-lag_max, lag_max + 1)
+    positive_lags = np.arange(0, lag_max + 1)
+
+    phi_r_r = correlation(batched_residuals, batched_residuals, lag_max).cpu().numpy()
+    _plot_and_log(phi_r_r, "Residual Autocorrelation", "residual_autocorr", lags)
+    phi_u_r = correlation(batched_inputs, batched_residuals, lag_max).cpu().numpy()
+    phi_u_r = phi_u_r[lag_max:]  # Keep only positive lags
+    _plot_and_log(phi_u_r, "Input-Residual Correlation", "input_residual_corr", positive_lags)
+    # shifted_product = batched_residuals[:, 1:] * batched_inputs[:, 1:]
+    phi_r_ru = correlation(batched_residuals, batched_inputs * batched_residuals, lag_max).cpu().numpy()
+    _plot_and_log(phi_r_ru, "Residual-Residual*Input Correlation", "residual_residual_input_corr", lags)
+
+    u_prime_squared = torch.square(batched_inputs) - torch.mean(batched_inputs ** 2, dim=-1, keepdim=True)
+    phi_u_prime_squared_r = correlation(u_prime_squared, batched_residuals, lag_max).cpu().numpy()
+    _plot_and_log(phi_u_prime_squared_r, "(U^2)' Residual Correlation", "u_squared_prime_residual_corr", lags)
+    phi_u_prime_squared_r_squared = correlation(u_prime_squared, batched_residuals ** 2, lag_max).cpu().numpy()
+    _plot_and_log(phi_u_prime_squared_r_squared, "(U^2)' Residual ^2 Correlation", "u_squared_prime_residual_squared_corr", lags)

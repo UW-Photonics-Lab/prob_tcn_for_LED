@@ -54,7 +54,12 @@ class TCN(nn.Module):
         out = self.readout(out).squeeze(1)
         out = out - out.mean(dim=1, keepdim=True)  # [B,T]
         return out
-
+    
+    def get_num_params(self):
+        total_params = 0
+        for param in self.parameters():
+            total_params += param.numel()
+        return total_params
 
 class TCN_channel(nn.Module):
     def __init__(self, nlayers=3, dilation_base=2, num_taps=10,
@@ -133,6 +138,12 @@ class TCN_channel(nn.Module):
             return noisy_out, mean_out, std_out, nu_out
         else:
             return mean_out
+    
+    def get_num_params(self):
+        total_params = 0
+        for param in self.parameters():
+            total_params += param.numel()
+        return total_params
 
 
 class memory_polynomial_channel(nn.Module):
@@ -271,3 +282,7 @@ class memory_polynomial_channel(nn.Module):
         y_pred = A_x @ self.weights
         y_pred = y_pred.reshape(B, T)
         return y_pred
+    
+    def get_num_params(self):
+        assert self.weights is not None, "Model must be fitted before getting number of parameters."
+        return self.weights.numel()
