@@ -476,7 +476,7 @@ def save_validation_data(
                 grp.attrs[k] = v
 
     except Exception as e:
-        return None
+        return e
 
     return time_stamp
 

@@ -694,7 +694,7 @@ def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,
 
     # Calculate BER
     BER = float(np.sum(true_bits_array != decided_bits_flat_array) / len(true_bits_array))
-    evm = torch.mean(torch.square(torch.abs(STATE['last_sent'] - STATE['last_received'])))
+    evm = torch.mean(torch.square(torch.abs(STATE['last_sent'] - STATE['last_received']))).item()
     # print("evm shapes:", STATE['last_sent'].shape, STATE['last_received'].shape)
 
     # Log frame BER
@@ -713,7 +713,7 @@ def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,
         
 
         # Save to Zarr file
-        save_validation_data(
+        error = save_validation_data(
             STATE['last_sent'],
             STATE['last_freq_symbol_received'],
             STATE['frequencies'],
@@ -724,7 +724,8 @@ def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,
             zarr_path = f"C:/Users/Public_Testing/Desktop/peled_interconnect/mldrivenpeled/data/validation_measurements/{wandb.run.name}.zarr",
             metadata={'BER': BER, 'EVM':evm}
         )
-
+        if isinstance(error, Exception):
+            decode_logger.error(f"Error saving validation data: {error}")
     else:
         cancel_run_early = False
 

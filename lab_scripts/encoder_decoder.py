@@ -5,9 +5,6 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 from training_state import STATE
 from noisy_state import NOISY_STATE
-# from lab_scripts.training_state import STATE
-# from lab_scripts.noisy_state import NOISY_STATE
-import h5py
 import zarr
 import time
 import torch
@@ -23,7 +20,6 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import matplotlib.colors as colors
 import time
-import pprint
 from transformers import get_linear_schedule_with_warmup
 import traceback
 from lab_scripts.constellation_diagram import QPSK_Constellation, get_constellation, RingShapedConstellation
@@ -37,13 +33,13 @@ project_root = os.path.abspath(os.path.join(script_dir, ".."))
 from lab_scripts.logging_code import *
 decode_logger = setup_logger(log_file=r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\test3.txt")
 
-STATE['validate_model'] = True # Variable
+STATE['validate_model'] = False # Variable
 STATE['normalize_power'] = False
 
-load_model = True # Variable
+load_model = False # Variable
 LOAD_DIR = ""
 if load_model:
-    model_name = "clear-disco-8071" # Variable
+    model_name = "eager-grass-413" # Variable
     STATE['encoder'], STATE['decoder'], hyperparams = load_runs_final_artifact(model_name, device=torch.device('cpu'), model_type="encoder_decoder", root_dir=project_root)
     # base_dir = r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\models\pickled_models"
     # LOAD_DIR = os.path.join(base_dir, model_name)
@@ -394,7 +390,7 @@ def gather_data_RY(real, imag):
         None, # No sent time
         STATE['last_time_symbol_received'],
         STATE['frequencies'],
-        zarr_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\channel_3e5-7.6MHz_2.68.V_0.125A_scale2_dynamic_power_0.5-3_v2.zarr")
+        zarr_path= r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\data\channel_measurements\channel_3e5-20MHz_2.739V_0.125A_47mA_scale2_dynamic_power_0.5-3_v2.zarr")
     STATE['decoder_out'] = out
     out = out.flatten() # Must flatten along batch dimension to output from labview
     return out.real.detach().cpu().contiguous().numpy().tolist(), out.imag.detach().cpu().contiguous().numpy().tolist()
