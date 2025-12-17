@@ -82,6 +82,12 @@ class TCN_channel(nn.Module):
         self.num_taps = num_taps
         self.gaussian = gaussian
 
+        # Calculate the total receptive field for the whole TCN stack
+        self.receptive_field = 1
+        for i in range(nlayers):
+            dilation = dilation_base ** i
+            self.receptive_field += (num_taps - 1) * dilation
+
         if not gaussian:
             with torch.no_grad():
                 # Initialize nu bias towards Gaussian for stability
@@ -227,8 +233,6 @@ class memory_polynomial_channel(nn.Module):
         return terms, weights
 
     def calculate_err(self, X, Y, plot=False):
-        X = X.to(torch.device("cpu")) # will crash cuda memory otherwise
-        Y = Y.to(torch.device("cpu"))
         A = self._create_regressors(X)
         Q, R = torch.linalg.qr(A, mode='reduced')
         b = Y.flatten()
