@@ -58,7 +58,15 @@ def calculate_rmse_pct_loss(y, y_pred):
     r = y - y_pred
     return (torch.sqrt(torch.mean(r ** 2) / torch.mean(y ** 2)) * 100).item()
 
-def extract_zarr_data(file_path, device, delay=None):
+def extract_zarr_data(file_path, device, delay=None, ofdm_info=None):
+    '''
+    Extracts OFDM data from zarr file and returns an OFDM_channel object
+
+    :param file_path: path to zarr file
+    :param device: torch.device to load data onto
+    :param delay: if provided, applies this delay to the received signal
+    :param ofdm_info: if provided, uses this OFDM_channel object instead of creating a new one
+    '''
     o_sets = OFDM_channel()
     cache_path = file_path.replace(".zarr", "_cached.pt").replace(".h5", "_cached.pt")
     if os.path.exists(cache_path):
@@ -342,7 +350,7 @@ def load_runs_final_artifact(
     project="mldrivenpeled",
     root_dir=None
 ):
-    
+
     if root_dir is None:
         base = "../models"
     else:
@@ -363,7 +371,7 @@ def load_runs_final_artifact(
 
     if not (os.path.exists(local_weights_path) and os.path.exists(local_config_path)):
         print(f"Artifact not found locally. Downloading run '{run_name}'...")
-        
+
         api = wandb.Api()
         runs = api.runs(f"{entity}/{project}", filters={"display_name": run_name})
         assert len(runs) > 0, f"Run '{run_name}' not found on W&B."
@@ -372,25 +380,25 @@ def load_runs_final_artifact(
         target_art = None
         # Keyword matching to find the right artifact
         keyword = "channel" if model_type == "channel" else "autoencoder"
-        
+
         for a in run.logged_artifacts():
             if keyword in a.name:
                 target_art = a
                 break
-        
+
         assert target_art is not None, f"Artifact with keyword '{keyword}' not found."
         target_art.download(root=cache_dir)
-        
+
         # Save config locally
         run_cfg = target_art.logged_by().config
         with open(local_config_path, "w") as g:
             json.dump(dict(run_cfg), g)
 
     print(f"Loading from {local_weights_path}")
-    
+
     with open(local_config_path, "r") as f:
         cfg = json.load(f)
-    
+
     weights = torch.load(local_weights_path, map_location="cpu")
 
     if model_type == "channel":
@@ -399,7 +407,7 @@ def load_runs_final_artifact(
             dilation_base=cfg["dilation_base"],
             num_taps=cfg["num_taps"],
             hidden_channels=cfg["hidden_channels"],
-            learn_noise=cfg.get("learn_noise", False), # .get() handles older configs safely
+            learn_noise=cfg.get("learn_noise", False),
             gaussian=cfg.get("gaussian", True)
         )
         model.load_state_dict(weights["channel_model"])
@@ -430,6 +438,8 @@ def save_validation_data(
     time_decoder_out,
     zarr_path=r"example.zarr",
     metadata: dict = None,
+    cp_length: int = None,
+    num_points_symbol: int = None,
 ):
 
 
@@ -458,6 +468,8 @@ def save_validation_data(
         grp.create_dataset("time_encoder_out", data=time_encoder_out)
         grp.create_dataset("time_decoder_in", data=time_decoder_in)
         grp.create_dataset("time_decoder_out", data=time_decoder_out)
+        grp.attrs["num_points_symbol"] = num_points_symbol
+        grp.attrs["cp_length"] = cp_length
 
         if metadata is not None:
             for k, v in metadata.items():
