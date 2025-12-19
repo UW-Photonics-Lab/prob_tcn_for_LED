@@ -56,7 +56,8 @@ def symbols_to_time(X,
 
 def calculate_rrmse_pct_loss(y, y_pred):
     r = y - y_pred
-    return (torch.sqrt((r ** 2) /(y ** 2) * 100)).item()
+    x = torch.mean(r ** 2) / torch.mean(y ** 2)
+    return (torch.sqrt(x) * 100).item()
 
 def extract_zarr_data(file_path, device, delay=None, ofdm_info=None):
     '''
@@ -348,7 +349,8 @@ def load_runs_final_artifact(
     model_type="channel",
     entity="dylanbackprops-university-of-washington",
     project="mldrivenpeled",
-    root_dir=None
+    root_dir=None,
+    sweep=None
 ):
 
     if root_dir is None:
@@ -373,7 +375,10 @@ def load_runs_final_artifact(
         print(f"Artifact not found locally. Downloading run '{run_name}'...")
 
         api = wandb.Api()
-        runs = api.runs(f"{entity}/{project}", filters={"display_name": run_name})
+        if sweep is not None:   
+            runs = api.runs(f"{entity}/{project}", filters={"display_name": run_name, "sweep": sweep})
+        else:
+            runs = api.runs(f"{entity}/{project}", filters={"display_name": run_name})
         assert len(runs) > 0, f"Run '{run_name}' not found on W&B."
         run = runs[0]
 
