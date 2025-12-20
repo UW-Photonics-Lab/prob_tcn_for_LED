@@ -4,6 +4,38 @@ import torch.nn.functional as F
 from torch.distributions.studentT import StudentT
 import matplotlib.pyplot as plt
 
+
+class ABC_time_model(nn.Module):
+    def __init__(self, theta=None):
+        super().__init__()
+        if theta is None:
+            self.theta = torch.nn.Parameter(torch.zeros(5))
+        else:
+            self.theta = theta
+        self.last_n_traj = None
+
+
+    def forward(self, x, return_n=True):
+        # x: [B, T]
+        B, T = x.shape
+        device = x.device
+        dtype = x.dtype
+        n = torch.zeros(B, device=device, dtype=dtype)
+        n_traj = torch.empty(B, T, device=device, dtype=dtype) if return_n else None
+        outputs = torch.empty(B, T, device=device, dtype=dtype)
+        theta0, theta1, theta2, theta3, theta4 = self.theta[0], self.theta[1], self.theta[2], self.theta[3], self.theta[4]
+        for t in range(T):
+            nsq = n * n
+            n = (x[:, t] + theta0 * n + theta1 * nsq + theta2 * nsq * n)
+            n = torch.tanh(n) # This nonlinearity helps keep n stable
+            outputs[:, t] = theta3 * n + theta4 * nsq
+            assert not torch.isnan(n).any(), f"NaN detected at step {t}"
+            if return_n:
+                n_traj[:, t] = n
+        self.last_n_traj = n_traj.detach()
+
+        return outputs
+
 class TCNBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, dilation):
         super().__init__()
