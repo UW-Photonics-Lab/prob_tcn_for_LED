@@ -94,7 +94,7 @@ def extract_zarr_data(file_path, device, delay=None, ofdm_info=None):
 
         # Loop through frames
         num_skipped = 0
-        for frame_key in root.group_keys():
+        for frame_key in sorted(root.group_keys()):
             try:
                 frame = root[frame_key]
                 if o_sets.FREQUENCIES is None:
@@ -375,7 +375,7 @@ def load_runs_final_artifact(
         print(f"Artifact not found locally. Downloading run '{run_name}'...")
 
         api = wandb.Api()
-        if sweep is not None:   
+        if sweep is not None:
             runs = api.runs(f"{entity}/{project}", filters={"display_name": run_name, "sweep": sweep})
         else:
             runs = api.runs(f"{entity}/{project}", filters={"display_name": run_name})
