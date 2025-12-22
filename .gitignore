@@ -13,3 +13,5 @@ wandb*
 notebooks/old*
 models/pickled_models/*
 *.pt
+data/*/old/*
+*.DS_Store
