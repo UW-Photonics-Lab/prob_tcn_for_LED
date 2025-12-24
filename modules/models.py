@@ -193,6 +193,9 @@ class memory_polynomial_channel(nn.Module):
                 device
                  ):
         super().__init__()
+        if device == torch.device('mps'):
+            print("MPS not supported. . . switching to CPU")
+            device = torch.device('cpu')
         if weights:
             self.weights = torch.tensor(weights, device=device)
         else:
@@ -265,6 +268,8 @@ class memory_polynomial_channel(nn.Module):
         return terms, weights
 
     def calculate_err(self, X, Y, plot=False):
+        X = X.to(self.device)
+        Y = Y.to(self.device)
         A = self._create_regressors(X).to(torch.float64)
         Q, R = torch.linalg.qr(A, mode='reduced')
         b = Y.flatten().to(torch.float64)
@@ -300,6 +305,8 @@ class memory_polynomial_channel(nn.Module):
 
 
     def fit(self, X, Y):
+        X = X.to(self.device)
+        Y = Y.to(self.device)
         A = self._create_regressors(X)
         Y_flat = Y.flatten()
 
@@ -309,8 +316,8 @@ class memory_polynomial_channel(nn.Module):
         B, T = X.shape
         y_pred = y_pred.reshape(B, T)
         residuals = Y - y_pred
-        self.weights = weights.to(self.device)
-        return weights, A, residuals.to(self.device)
+        self.weights = weights
+        return weights, A, residuals
 
     def forward(self, X):
         A_x = self._create_regressors(X)
