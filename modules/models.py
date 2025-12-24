@@ -86,7 +86,7 @@ class TCN(nn.Module):
         out = self.readout(out).squeeze(1)
         out = out - out.mean(dim=1, keepdim=True)  # [B,T]
         return out
-    
+
     def get_num_params(self):
         total_params = 0
         for param in self.parameters():
@@ -176,7 +176,7 @@ class TCN_channel(nn.Module):
             return noisy_out, mean_out, std_out, nu_out
         else:
             return mean_out
-    
+
     def get_num_params(self):
         total_params = 0
         for param in self.parameters():
@@ -265,9 +265,9 @@ class memory_polynomial_channel(nn.Module):
         return terms, weights
 
     def calculate_err(self, X, Y, plot=False):
-        A = self._create_regressors(X)
+        A = self._create_regressors(X).to(torch.float64)
         Q, R = torch.linalg.qr(A, mode='reduced')
-        b = Y.flatten()
+        b = Y.flatten().to(torch.float64)
         # Project onto columns of Q
         g = torch.matmul(Q.T, b)
         total_variance = torch.sum(b ** 2)
@@ -318,7 +318,7 @@ class memory_polynomial_channel(nn.Module):
         y_pred = A_x @ self.weights
         y_pred = y_pred.reshape(B, T)
         return y_pred
-    
+
     def get_num_params(self):
         assert self.weights is not None, "Model must be fitted before getting number of parameters."
         return self.weights.numel()
