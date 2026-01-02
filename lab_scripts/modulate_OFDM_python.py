@@ -694,7 +694,7 @@ def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,
 
     # Calculate BER
     BER = float(np.sum(true_bits_array != decided_bits_flat_array) / len(true_bits_array))
-    evm = torch.mean(torch.square(torch.abs(STATE['last_sent'] - STATE['last_received']))).item()
+    evm = torch.mean(torch.square(torch.abs(STATE['last_sent'] - STATE['last_received']))).item() # this is slightly different from standard EVM calculation but is corrected later while making figures
     # print("evm shapes:", STATE['last_sent'].shape, STATE['last_received'].shape)
 
     # Log frame BER
