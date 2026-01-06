@@ -329,3 +329,93 @@ class memory_polynomial_channel(nn.Module):
     def get_num_params(self):
         assert self.weights is not None, "Model must be fitted before getting number of parameters."
         return self.weights.numel()
+    
+
+class GeneralizedMemoryPolynomial(memory_polynomial_channel):
+    def __init__(self, weights, memory_linear, memory_nonlinear, nonlinearity_order, cross_term_depth, device):
+        super().__init__(weights, memory_linear, memory_nonlinear, nonlinearity_order, device)
+        self.cross_term_depth = cross_term_depth
+
+    def _create_regressors(self, X):
+        B, T = X.shape
+        # Each example and target will get a matrix and column vector. All will be stacked
+        # to form a A with shape [NxT, memory_linear + memory_nonlinearxnonlinear_order] regressor matrix
+
+        X_powers = {k: torch.pow(X, k) for k in range(1, self.nonlinearity_order + 1)}
+        batched_regressor_cols = []
+        num_regressors = (
+            (self.memory_linear + 1) +
+            (self.memory_nonlinear + 1) * (self.nonlinearity_order - 1) * (self.cross_term_depth + 1)
+        )
+        regressor_length = T * B
+        for i in range(self.memory_linear + 1):
+            X_shifted = torch.roll(X, i, dims=1)
+            X_shifted[:, :i] = 0.0
+            batched_regressor_cols.append(X_shifted)
+
+        for k in range(2, self.nonlinearity_order + 1):
+            X_pow_k = X_powers[k]
+            for j in range(self.memory_nonlinear + 1):
+                X_shifted_pow = torch.roll(X_pow_k, j, dims=1)
+                X_shifted_pow[:, :j] = 0.0
+                batched_regressor_cols.append(X_shifted_pow)
+                
+        # Cross-terms
+        for k in range(2, self.nonlinearity_order + 1):
+            X_pow_k = X_powers[k - 1]
+            for j in range(self.memory_nonlinear + 1):
+                X_shifted_base = torch.roll(X, j, dims=1)
+                X_shifted_base[:, : (j)] = 0.0
+                for d in range(1, self.cross_term_depth + 1):
+                    X_shifted_pow = torch.roll(X_pow_k, j + d, dims=1)
+                    X_shifted_pow[:, : (j + d)] = 0.0
+                    cross_term = X_shifted_pow * X_shifted_base
+                    batched_regressor_cols.append(cross_term)
+
+        stack = torch.stack(batched_regressor_cols) # [features, B, T]
+        stack = stack.permute(1, 2, 0) # [B, T, features]
+        A = stack.reshape(regressor_length, num_regressors)
+        return A.to(self.device)
+
+    def show_terms(self, plot=False):
+        weights = self.weights.detach().cpu()
+        terms = []
+        linear_weights = []
+        idx = 0
+        for i in range(self.memory_linear + 1):
+            terms.append(f"x[{-i}]")
+            linear_weights.append(weights[idx].item())
+            idx += 1
+        if plot:
+            plt.plot(linear_weights)
+            plt.title("Plot of Linear Weights vs. Memory Length")
+            plt.xlabel("Memory Tap")
+            plt.ylabel("Weight Value")
+            plt.show()
+
+        for k in range(2, self.nonlinearity_order + 1):
+            k_th_weights = []
+            for j in range(self.memory_nonlinear + 1):
+                terms.append(f"x[{-j}]^{k}")
+                k_th_weights.append(weights[idx].item())
+                idx += 1
+
+            if plot:
+                plt.plot(k_th_weights)
+                plt.title(f"Plot of Weights Order {k} vs. Memory Length")
+                plt.xlabel("Memory Tap")
+                plt.ylabel("Weight Value")
+                plt.show()
+
+        # Cross-terms
+        for k in range(2, self.nonlinearity_order + 1):
+            for j in range(self.memory_nonlinear + 1):
+                for d in range(1, self.cross_term_depth + 1):
+                    terms.append(f"x[{-(j)}] * x[{-(j + d)}]^{k - 1}")
+                    idx += 1
+
+        weights = None
+        if self.weights is not None:
+            weights = self.weights.detach().cpu().tolist()
+
+        return terms, weights
