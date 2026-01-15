@@ -1,14 +1,14 @@
 import sys
+import zarr
 module_dir = r'C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled'
 if module_dir not in sys.path:
     sys.path.append(module_dir)
 from lab_scripts.constellation_diagram import QPSK_Constellation
 from lab_scripts.constellation_diagram import RingShapedConstellation
-from encoder_decoder import update_weights
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
-from scipy.signal import resample_poly, resample
+from scipy.signal import resample_poly
 from scipy import signal
 from scipy.signal import find_peaks
 import os
@@ -21,7 +21,9 @@ import matplotlib.colors as colors
 from scipy.fft import irfft, rfft
 from fractions import Fraction
 from scipy.signal import hilbert, filtfilt, butter
-
+from modules.utils import calculate_BER, evm_loss, save_validation_data
+from constellation_diagram import get_constellation
+from encoder_decoder import append_symbol_frame
 # Get logging
 from lab_scripts.logging_code import *
 STATE['normalize_power'] = False
@@ -30,24 +32,6 @@ STATE['in_band_filter'] = False
 decode_logger = setup_logger(log_file=r"C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\debug_logs\test3.txt")
 STATE["frame_BER_accumulator"] = [] # Use to estimate BER over many frames
 STATE['frame_evm_accumulator'] = []
-def get_constellation(mode: str):
-        if mode == "qpsk":
-            constellation = QPSK_Constellation()
-        elif mode == "m5_apsk_constellation":
-            constellation = RingShapedConstellation(filename=r'C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\lab_scripts\saved_constellations\m5_apsk_constellation.npy')
-        elif mode == "m6_apsk_constellation":
-            constellation = RingShapedConstellation(filename=r'C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\lab_scripts\saved_constellations\m6_apsk_constellation.npy')
-        elif mode == "m7_apsk_constellation":
-            constellation = RingShapedConstellation(filename=r'C:\Users\Public_Testing\Desktop\peled_interconnect\mldrivenpeled\lab_scripts\saved_constellations\m7_apsk_constellation.npy')
-        return constellation
-
-# def resample_poly(signal, **kwargs):
-#     rms_before = np.sqrt(np.mean(np.square(signal)))
-#     resampled_signal = resample_poly(signal, **kwargs)
-#     rms_after = np.sqrt(np.mean(np.square(resampled_signal)))
-#     scaling_factor = rms_before / rms_after
-#     corrected_signal = resampled_signal * scaling_factor
-#     return corrected_signal
 
 def modulate_data_OFDM(mode: str, 
                        num_carriers: int, 
@@ -208,9 +192,6 @@ def symbols_to_xt(real_symbol_groups: list[list[float]], imag_symbol_groups: lis
     data_hi = data_lo + STATE['Nf']
     STATE['last_sent'] = torch.tensor(symbol_groups[:, data_lo:data_hi])
     N_t = symbol_groups.shape[0]
-    # barker_code = 3 *  np.array([0, 0, 0, 1, -1, 1, -1, 1,-1, 1, -1, 1, 0, 0, 0], dtype=float)
-    # barker_code = np.repeat(barker_code, BARKER_LENGTH // len(barker_code)) # Set as 1%
-
     zc_sequence = generate_zadoff_chu(BARKER_LENGTH, root=1)
     barker_code = np.real(zc_sequence) 
     barker_code /= np.max(np.abs(barker_code))
@@ -265,69 +246,9 @@ def add_preamble_and_upsample(x_t_frame, preamble):
     # decode_logger.debug(f"Preamble heights {preamble_min} | {preamble_max}")
     x_t_frame = np.clip(x_t_frame, preamble_min, preamble_max)
     x_t_with_barker = np.concatenate([preamble, x_t_frame])
-
-    if False:
-        preamble_fft = np.fft.fft(preamble)
-        freqs_before = np.fft.fftfreq(len(preamble), 1/(STATE['IFFT_LENGTH'] * STATE['delta_f']))
-        upsampled_preamble = resample_poly(preamble, up=SCALING_FACTOR, down=1, )
-        # After upsampling
-        upsampled_fft = np.fft.fft(upsampled_preamble)
-        freqs_after = np.fft.fftfreq(len(upsampled_preamble), 1/(STATE['delta_f'] * STATE['IFFT_LENGTH']*SCALING_FACTOR))
-
-        plt.subplot(211)
-        plt.plot(freqs_before[:len(freqs_before)//2], np.abs(preamble_fft[:len(preamble_fft)//2]))
-        plt.title('Preamble Spectrum Before Upsampling')
-
-        plt.subplot(212)
-        plt.plot(freqs_after[:len(freqs_after)//2], np.abs(upsampled_fft[:len(upsampled_fft)//2]))
-        plt.title('Preamble Spectrum After Upsampling')
-        plt.show()
-
     x_t_with_barker = resample_poly(x_t_with_barker, up=SCALING_FACTOR, down=1)
     x_t_with_barker = x_t_with_barker[:AWG_MEMORY_LENGTH_MAX]  # truncate if needed
     return x_t_with_barker.reshape(1, -1).tolist()
-
-def find_start(peak, voltages, preamble_length, ofdm_payload_length, search_window=20):
-    '''Based on rough estimates of peaks, use the cyclic prefix to find a better start to the frame'''
-    num_symbols = STATE['Nt']
-    curr_start = peak + preamble_length
-    symbol_length = (ofdm_payload_length // num_symbols)
-    cp_length = int(CP_RATIO * symbol_length)
-    N_fft = symbol_length - cp_length
-    best_start = curr_start
-    best_corr = 0
-    STATE['offs'], STATE['corrs'], STATE['phis'] = [], [], []
-    for offset in range(-search_window, search_window + 1):
-        # Test correlation of cyclic prefix and tail
-        start = curr_start + offset
-        end = start + symbol_length
-        if start < 0 or end > len(voltages):
-            continue # try different offset
-        symbol = voltages[start: end]
-        analytic_symbol = hilbert(symbol)
-        cyclic_prefix_j = analytic_symbol[:cp_length]
-        tail_j = analytic_symbol[-cp_length: ]
-        corr = np.vdot(cyclic_prefix_j, tail_j) / (np.linalg.norm(cyclic_prefix_j) * np.linalg.norm(tail_j))
-        STATE['offs'].append(offset)
-        STATE['corrs'].append(np.abs(corr))
-        STATE['phis'].append(np.angle(corr))
-        if np.abs(corr) > best_corr:
-            best_corr = np.abs(corr)
-            best_start = curr_start + offset
-            best_phi = np.angle(corr)
-            omega_hat = best_phi / float(N_fft)
-            epsilon_hat = best_phi / (2 * np.pi)
-    if STATE['verify_synchronization']:
-        # Plot correlation vs various offsets
-        offs = np.array(STATE['offs'])
-        corrs = np.array(STATE['corrs'])
-        plt.plot(offs, corrs)
-        plt.xlabel("Offset")
-        plt.ylabel("Correlation")
-        plt.show()
-
-    return best_start, best_start - preamble_length, omega_hat, epsilon_hat
-
 
 def in_band_filter(xt, in_band_indices, nfft):
     xt = torch.tensor(xt)
@@ -387,10 +308,6 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
     DEBUG_ALIASING = False
 
 
-    # Filter out high frequency content from preamble to avoid rollover
-    # b, a = butter(N=16, Wn=cutoff, btype='low', fs=osc_sample_rate)
-    # y_t_filtered = filtfilt(b, a, y_t)
-
     if DEBUG_ALIASING:
         # plot current received spectrum
         Yk = np.abs(np.fft.fft(y_t, norm='ortho'))
@@ -404,7 +321,6 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
         plt.ylabel("|Y|")
         plt.grid(True)
         plt.show()
-
 
     y_t_filtered = y_t
     if DEBUG_ALIASING:
@@ -438,7 +354,6 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
 
 
 
-
     # Get actual frame length
     if len(peaks) > 1:
         actual_frame_length = round(np.median(np.diff(peaks)))
@@ -461,8 +376,6 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
         plt.title('Correlation with Preamble')
         plt.xlabel('Sample')
         plt.ylabel('Correlation')
-                # Add peak labels
-        # for i, peak in enumerate(peaks):
         plt.plot(20, corr[peak], 'r^')  # Red triangle marker
         i=0
         plt.annotate(f'Peak {i+1}\n({peak})', 
@@ -489,7 +402,6 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
         plt.ylabel('Amplitude')
 
     frame_y_t = np.array(frame)
-    frame_len = len(frame_y_t)
     symbol_len = STATE['num_points_symbol'] 
     fft_len = STATE['IFFT_LENGTH']           
     CP_length = STATE['cp_length'] 
@@ -531,10 +443,6 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
             plt.grid(True, alpha=0.3)
             plt.legend(ncol=3, fontsize=8)
             plt.show()
-        # Account for CFO 
-        # n = np.arange(fft_len, dtype= np.complex128)
-        # symbol *= np.exp(-1j * best_omega * n)
-        # symbol /= np.max(np.abs(symbol)) + 1e-12
         symbols.append(symbol)
         symbols_with_cp.append(symbol_with_cp)
 
@@ -545,20 +453,19 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
     # decode_logger.debug(f"Received time array power {np.mean(np.square(symbols_arr))} | shape {symbols_arr.shape}")
 
     # Apply time decoder here
-    if 'time_model' in STATE:
-        if STATE['apply_time_decoder'] and STATE['time_model']:
-            if STATE['run_model']:
-                with torch.no_grad():
-                    symbols_arr = torch.tensor(symbols_arr, dtype=torch.float32)
-                    # decode_logger.debug(f"decoder in {symbols_arr.shape}")
-                    STATE['time_decoder_in'] = symbols_arr.detach().cpu().numpy()
-                    symbols_arr = STATE["decoder"](symbols_arr)
-                    # decode_logger.debug(f"decoder out {symbols_arr.shape}")
-                    STATE['time_decoder_out'] = symbols_arr.detach().cpu().numpy()
-                    symbols_arr = STATE['time_decoder_out']
-            else:
-                STATE['time_decoder_out'] = symbols_arr
-                STATE['time_decoder_in'] = STATE['time_decoder_out']
+    if 'run_model' in STATE and STATE['validate_model']:
+        if STATE['run_model']:
+            with torch.no_grad():
+                symbols_arr = torch.tensor(symbols_arr, dtype=torch.float32)
+                # decode_logger.debug(f"decoder in {symbols_arr.shape}")
+                STATE['time_decoder_in'] = symbols_arr.detach().cpu().numpy()
+                symbols_arr = STATE["decoder"](symbols_arr)
+                # decode_logger.debug(f"decoder out {symbols_arr.shape}")
+                STATE['time_decoder_out'] = symbols_arr.detach().cpu().numpy()
+                symbols_arr = STATE['time_decoder_out']
+        else:
+            STATE['time_decoder_out'] = symbols_arr
+            STATE['time_decoder_in'] = STATE['time_decoder_out']
     
     # perform in band filters
     if STATE['in_band_filter']:
@@ -663,15 +570,10 @@ def demodulate_OFDM_one_symbol_frame(y_t:list,
 
 def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,  mode: str) -> list:
     # Instead of grabbing from labview, directly take from decoder
-
-    # symbols = torch.tensor(real_symbols) + 1j * torch.tensor(imag_symbols)
-
     symbols = STATE['last_received']
     
     # # Grab constellation object
     constellation = get_constellation(mode)
-    # true_bits_array = np.array(list(constellation.symbols_to_bits(STATE['last_sent'])))
-
 
     # Demap symbols to bits
     constellation_symbols = torch.tensor(
@@ -702,23 +604,14 @@ def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,
 
     # Calculate BER
     BER = float(np.sum(true_bits_array != decided_bits_flat_array) / len(true_bits_array))
-    evm = torch.mean(torch.square(torch.abs(STATE['last_sent'] - STATE['last_received'])))
+    evm = torch.mean(torch.square(torch.abs(STATE['last_sent'] - STATE['last_received']))).item() # this is slightly different from standard EVM calculation but is corrected later while making figures
     # print("evm shapes:", STATE['last_sent'].shape, STATE['last_received'].shape)
 
     # Log frame BER
     STATE['frame_BER'] = BER
 
        # Call backprop and log loss
-    if 'encoder_out' in STATE and 'decoder_out' in STATE and STATE['train_model']:
-        cancel_run_early = update_weights()
-    elif 'cancel_channel_train' in STATE:
-        cancel_run_early = STATE['cancel_channel_train']
-
-    elif STATE['validate_model'] and not STATE['time_model']:
-        make_validate_plots(STATE['encoder_in'], STATE['decoder_out'], STATE['frame_BER'], STATE['run_model'], STATE['frequencies'])
-        cancel_run_early = False
-
-    elif STATE['time_model'] and STATE['validate_model']:
+    if 'validate_model' in STATE and STATE['validate_model']:
         cancel_run_early = False
         if STATE['run_model']:
             wandb.log({"freq model evm loss": evm})
@@ -727,7 +620,22 @@ def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,
         make_time_validate_plots(STATE['time_encoder_in'], STATE['time_encoder_out'],
                                  STATE['time_decoder_in'], STATE['time_decoder_out'], 
                                  STATE['frame_BER'], STATE['run_model'], STATE['frequencies'])
+        
 
+        # Save to Zarr file
+        error = save_validation_data(
+            STATE['last_sent'],
+            STATE['last_freq_symbol_received'],
+            STATE['frequencies'],
+            STATE['time_encoder_in'],
+            STATE['time_encoder_out'],
+            STATE['time_decoder_in'],
+            STATE['time_decoder_out'],
+            zarr_path = f"C:/Users/Public_Testing/Desktop/peled_interconnect/mldrivenpeled/data/validation_measurements/{wandb.run.name}.zarr",
+            metadata={'BER': BER, 'EVM':evm}
+        )
+        if isinstance(error, Exception):
+            decode_logger.error(f"Error saving validation data: {error}")
     else:
         cancel_run_early = False
 
@@ -735,91 +643,6 @@ def decode_symbols_OFDM(real_symbols: list, imag_symbols: list, true_bits: list,
 
     cancel_run_early = False
     return decided_bits_flat, float(BER), evm, PowerFactor, cancel_run_early
-
-def make_validate_plots(encoder_in, decoder_out, frame_BER, run_model, freqs=None):
-    """
-    Logs EVM loss, frame BER, and constellation diagram to wandb.
-    If `freqs` is provided, colors the constellation by subcarrier frequency.
-    """
-    # Calculate EVM loss
-    evm = torch.mean(
-        (encoder_in.real - decoder_out.real) ** 2 + (encoder_in.imag - decoder_out.imag) ** 2
-    ).item()
-
-    # Choose prefix based on run_model
-    prefix = "validate/model_" if run_model else "validate/no_model_"
-
-    # Get running average
-    if run_model:
-        STATE['frame_evm_accumulator'].append(evm)
-        STATE["frame_BER_accumulator"].append(frame_BER)
-        running_evm = np.mean(np.array(STATE['frame_evm_accumulator']))
-        running_ber = np.mean(np.array(STATE['frame_BER_accumulator']))
-        wandb.log({f"{prefix}running_evm_loss": running_evm})
-        wandb.log({f"{prefix}running_frame_BER": running_ber})
-   
-
-    wandb.log({f"{prefix}evm_loss": evm})
-    wandb.log({f"{prefix}frame_BER": frame_BER})
-    encoder_np = encoder_in.detach().cpu().numpy()
-    decoder_np = decoder_out.detach().cpu().numpy()
-
- 
-    fig, ax = plt.subplots(figsize=(6, 6))
-    if freqs is not None:
-        freqs = np.asarray(freqs)
-        if freqs.ndim == 2:
-            freqs = freqs[0]  # Pick first symbol if batched
-        norm = colors.Normalize(vmin=freqs.min(), vmax=freqs.max())
-        cmap = cm.viridis
-        colors_mapped = cmap(norm(freqs))
-        ax.scatter(
-            decoder_np.real.flatten(),
-            decoder_np.imag.flatten(),
-            c=colors_mapped,
-            s=10,
-            label="Decoder Out"
-        )
-        sm = cm.ScalarMappable(norm=norm, cmap=cmap)
-        sm.set_array([])
-        cbar = fig.colorbar(sm, ax=ax, pad=0.01)
-        cbar.set_label("Subcarrier Frequency (Hz)")
-    else:
-        ax.scatter(
-            decoder_np.real.flatten(),
-            decoder_np.imag.flatten(),
-            s=10,
-            label="Decoder Out"
-        )
-
-    ax.scatter(
-        encoder_np.real.flatten(),
-        encoder_np.imag.flatten(),
-        s=10,
-        c="gray",
-        alpha=0.5,
-        label="Encoder In"
-    )
-
-    ax.set_title(f"Constellation ({'Trained' if run_model else 'Untrained'})\nEVM: {evm:.2e}, BER: {frame_BER:.2f}")
-    ax.set_xlabel("Real")
-    ax.set_ylabel("Imag")
-    ax.legend()
-    ax.grid(True)
-
-    # Save and log
-    plot_path = f"wandb_constellations/{prefix}constellation.png"
-    os.makedirs(os.path.dirname(plot_path), exist_ok=True)
-    fig.savefig(plot_path, dpi=150)
-    wandb.log({f"{prefix}constellation": wandb.Image(plot_path)})
-    plt.close(fig)
-    if os.path.exists(plot_path):
-        os.remove(plot_path)
-    
-    if STATE['run_model']:
-        STATE['run_model'] = False
-    else:
-        STATE['run_model'] = True
 
 def make_time_validate_plots(encoder_in, encoder_out, decoder_in, decoder_out, frame_BER, run_model, freqs=None):
     encoder_in = np.asarray(encoder_in)
@@ -907,7 +730,3 @@ def make_time_validate_plots(encoder_in, encoder_out, decoder_in, decoder_out, f
 
     if os.path.exists(plot_path):
         os.remove(plot_path)
-    if STATE['run_model']:
-        STATE['run_model'] = False
-    else:
-        STATE['run_model'] = True

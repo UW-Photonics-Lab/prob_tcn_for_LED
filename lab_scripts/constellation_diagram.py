@@ -1,9 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
-
-
 from abc import ABC, abstractmethod
-
+import os
 class ConstellationDiagram(ABC):
 
     def __init__(self, complex_symbols: np.array):
@@ -12,11 +10,11 @@ class ConstellationDiagram(ABC):
         normalized_symbols = complex_symbols / np.sqrt(avg_power)
         self._complex_symbols = normalized_symbols
         self._symbols_to_bits_map = self._generate_bit_map(self._complex_symbols)
-    
+
     @abstractmethod
     def _generate_bit_map(self, complex_symbols: np.array) -> dict[complex, str]:
         pass
-    
+
     @abstractmethod
     def symbols_to_bits(self, complex_symbols: np.array) -> str:
         pass
@@ -24,7 +22,7 @@ class ConstellationDiagram(ABC):
     @abstractmethod
     def bits_to_symbols(self, bits: str) -> np.array:
         pass
-    
+
     @abstractmethod
     def visualize_constellation(self):
         pass
@@ -48,11 +46,11 @@ class QPSK_Constellation(ConstellationDiagram):
             else:
                 sub_combinations = build_bits(order - 1)
                 return ["1" + c for c in sub_combinations] + ["0" + c for c in sub_combinations]
-            
+
         bits = build_bits(modulation_order)
         bit_mapping = dict(zip(complex_symbols, bits))
         return bit_mapping
-    
+
     def bits_to_symbols(self, bits: str) -> np.array:
         # Group strings into size by modulation order
         if len(bits) % 2 != 0:
@@ -62,12 +60,12 @@ class QPSK_Constellation(ConstellationDiagram):
         bits_to_symbol_map = {v : k for k, v in self._symbols_to_bits_map.items()}
         symbols = np.array([bits_to_symbol_map[group] for group in grouped_bits])
         return symbols
-    
+
     def symbols_to_bits(self, complex_symbols):
         bit_groups = [self._symbols_to_bits_map[s] for s in complex_symbols]
         bits = "".join(bit_groups)
         return bits
-    
+
     def visualize_constellation(self):
         reals = np.real(self._complex_symbols)
         imags = np.imag(self._complex_symbols)
@@ -142,3 +140,16 @@ class RingShapedConstellation(ConstellationDiagram):
         plt.xlabel("Real Part")
         plt.ylabel("Imaginary Part")
         plt.show()
+
+def get_constellation(mode: str):
+    PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    base = os.path.join(PROJECT_ROOT, "modules", "saved_constellations")
+    if mode == "qpsk":
+        return QPSK_Constellation()
+    if mode == "m5_apsk_constellation":
+        return RingShapedConstellation(filename=os.path.join(base, "m5_apsk_constellation.npy"))
+    if mode == "m6_apsk_constellation":
+        return RingShapedConstellation(filename=os.path.join(base, "m6_apsk_constellation.npy"))
+    if mode == "m7_apsk_constellation":
+        return RingShapedConstellation(filename=os.path.join(base, "m7_apsk_constellation.npy"))
+    return None

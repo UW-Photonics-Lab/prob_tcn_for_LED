@@ -4,6 +4,38 @@ import torch.nn.functional as F
 from torch.distributions.studentT import StudentT
 import matplotlib.pyplot as plt
 
+
+class ABC_time_model(nn.Module):
+    def __init__(self, theta=None):
+        super().__init__()
+        if theta is None:
+            self.theta = torch.nn.Parameter(torch.zeros(5))
+        else:
+            self.theta = theta
+        self.last_n_traj = None
+
+
+    def forward(self, x, return_n=True):
+        # x: [B, T]
+        B, T = x.shape
+        device = x.device
+        dtype = x.dtype
+        n = torch.zeros(B, device=device, dtype=dtype)
+        n_traj = torch.empty(B, T, device=device, dtype=dtype) if return_n else None
+        outputs = torch.empty(B, T, device=device, dtype=dtype)
+        theta0, theta1, theta2, theta3, theta4 = self.theta[0], self.theta[1], self.theta[2], self.theta[3], self.theta[4]
+        for t in range(T):
+            nsq = n * n
+            n = (x[:, t] + theta0 * n + theta1 * nsq + theta2 * nsq * n)
+            n = torch.tanh(n) # This nonlinearity helps keep n stable
+            outputs[:, t] = theta3 * n + theta4 * nsq
+            assert not torch.isnan(n).any(), f"NaN detected at step {t}"
+            if return_n:
+                n_traj[:, t] = n
+        self.last_n_traj = n_traj.detach()
+
+        return outputs
+
 class TCNBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, dilation):
         super().__init__()
@@ -54,7 +86,12 @@ class TCN(nn.Module):
         out = self.readout(out).squeeze(1)
         out = out - out.mean(dim=1, keepdim=True)  # [B,T]
         return out
-    
+
+    def get_num_params(self):
+        total_params = 0
+        for param in self.parameters():
+            total_params += param.numel()
+        return total_params
 
 class TCN_channel(nn.Module):
     def __init__(self, nlayers=3, dilation_base=2, num_taps=10,
@@ -77,6 +114,12 @@ class TCN_channel(nn.Module):
         self.num_taps = num_taps
         self.gaussian = gaussian
 
+        # Calculate the total receptive field for the whole TCN stack
+        self.receptive_field = 1
+        for i in range(nlayers):
+            dilation = dilation_base ** i
+            self.receptive_field += (num_taps - 1) * dilation
+
         if not gaussian:
             with torch.no_grad():
                 # Initialize nu bias towards Gaussian for stability
@@ -88,11 +131,11 @@ class TCN_channel(nn.Module):
         Samples from a Student's t-distribution using PyTorch's built-in implementation.
         Uses rsample() to maintain gradients for 'std' and 'nu'.
         """
-        nu = torch.clamp(nu, min=2.001) 
+        nu = torch.clamp(nu, min=2.001)
         std = torch.clamp(std, min=1e-6)
         dist = StudentT(df=nu, loc=mean, scale=std)
         return dist.rsample()
-    
+
 
     def sample_student_t_mps(self, mean, std, nu):
         '''
@@ -122,17 +165,23 @@ class TCN_channel(nn.Module):
         if self.gaussian:
             z = torch.randn_like(mean_out)
             noisy_out = mean_out + std_out * z
-            nu_out = torch.zeros_like(mean_out)
+            nu_out = torch.full_like(mean_out, float('inf')) # nu = inf for Gaussian
         else:
             if xin.device.type == "mps":
                 noisy_out = self.sample_student_t_mps(mean_out, std_out, nu_out)
             else:
                 noisy_out = self.sample_student_t_pytorch(mean_out, std_out, nu_out)
-            
+
         if self.learn_noise:
             return noisy_out, mean_out, std_out, nu_out
         else:
             return mean_out
+
+    def get_num_params(self):
+        total_params = 0
+        for param in self.parameters():
+            total_params += param.numel()
+        return total_params
 
 
 class memory_polynomial_channel(nn.Module):
@@ -144,6 +193,9 @@ class memory_polynomial_channel(nn.Module):
                 device
                  ):
         super().__init__()
+        if device == torch.device('mps'):
+            print("MPS not supported. . . switching to CPU")
+            device = torch.device('cpu')
         if weights:
             self.weights = torch.tensor(weights, device=device)
         else:
@@ -151,6 +203,7 @@ class memory_polynomial_channel(nn.Module):
         self.memory_linear = memory_linear
         self.memory_nonlinear = memory_nonlinear
         self.nonlinearity_order = nonlinearity_order
+        self.device = device
 
     def _create_regressors(self, X):
         B, T = X.shape
@@ -176,8 +229,8 @@ class memory_polynomial_channel(nn.Module):
         stack = torch.stack(batched_regressor_cols) # [features, B, T]
         stack = stack.permute(1, 2, 0) # [B, T, freatures]
         A = stack.reshape(regressor_length, num_regressors)
-        return A
-    
+        return A.to(self.device)
+
     def show_terms(self, plot=False):
         weights = self.weights.detach().cpu()
         terms = []
@@ -187,7 +240,6 @@ class memory_polynomial_channel(nn.Module):
             terms.append(f"x[{-i}]")
             linear_weights.append(weights[idx].item())
             idx += 1
-        
         if plot:
             plt.plot(linear_weights)
             plt.title("Plot of Linear Weights vs. Memory Length")
@@ -214,11 +266,13 @@ class memory_polynomial_channel(nn.Module):
             weights = self.weights.detach().cpu().tolist()
 
         return terms, weights
-    
+
     def calculate_err(self, X, Y, plot=False):
-        A = self._create_regressors(X)
+        X = X.to(self.device)
+        Y = Y.to(self.device)
+        A = self._create_regressors(X).to(torch.float64)
         Q, R = torch.linalg.qr(A, mode='reduced')
-        b = Y.flatten()
+        b = Y.flatten().to(torch.float64)
         # Project onto columns of Q
         g = torch.matmul(Q.T, b)
         total_variance = torch.sum(b ** 2)
@@ -236,12 +290,12 @@ class memory_polynomial_channel(nn.Module):
             print("-" * 50)
             print(f"{'Rank':<5} | {'Term String':<20} | {'ERR (%)':<15}")
             print("-" * 50)
-            
+
             cumulative_err = 0.0
             for i, (term, err) in enumerate(ranked_data):
                 cumulative_err += err
                 print(f"{i+1:<5} | {term:<20} | {err:.6f}%")
-            
+
             print("-" * 50)
             print(f"Total Variance Explained: {cumulative_err:.4f}%")
             print(f"  > Linear Contribution:    {total_linear_err:.4f}%")
@@ -251,11 +305,12 @@ class memory_polynomial_channel(nn.Module):
 
 
     def fit(self, X, Y):
+        X = X.to(self.device)
+        Y = Y.to(self.device)
         A = self._create_regressors(X)
         Y_flat = Y.flatten()
 
-        weights, residuals, rank, s = torch.linalg.lstsq(A, Y_flat)
-        # print("Solved Weights:", weights)
+        weights, residuals, rank, s = torch.linalg.lstsq(A, Y_flat, driver='gels')
         y_pred = A @ weights
         # Reshape back to (B, T) for analysis
         B, T = X.shape
@@ -270,3 +325,97 @@ class memory_polynomial_channel(nn.Module):
         y_pred = A_x @ self.weights
         y_pred = y_pred.reshape(B, T)
         return y_pred
+
+    def get_num_params(self):
+        assert self.weights is not None, "Model must be fitted before getting number of parameters."
+        return self.weights.numel()
+    
+
+class GeneralizedMemoryPolynomial(memory_polynomial_channel):
+    def __init__(self, weights, memory_linear, memory_nonlinear, nonlinearity_order, cross_term_depth, device):
+        super().__init__(weights, memory_linear, memory_nonlinear, nonlinearity_order, device)
+        self.cross_term_depth = cross_term_depth
+
+    def _create_regressors(self, X):
+        B, T = X.shape
+        # Each example and target will get a matrix and column vector. All will be stacked
+        # to form a A with shape [NxT, memory_linear + memory_nonlinearxnonlinear_order] regressor matrix
+
+        X_powers = {k: torch.pow(X, k) for k in range(1, self.nonlinearity_order + 1)}
+        batched_regressor_cols = []
+        num_regressors = (
+            (self.memory_linear + 1) +
+            (self.memory_nonlinear + 1) * (self.nonlinearity_order - 1) * (self.cross_term_depth + 1)
+        )
+        regressor_length = T * B
+        for i in range(self.memory_linear + 1):
+            X_shifted = torch.roll(X, i, dims=1)
+            X_shifted[:, :i] = 0.0
+            batched_regressor_cols.append(X_shifted)
+
+        for k in range(2, self.nonlinearity_order + 1):
+            X_pow_k = X_powers[k]
+            for j in range(self.memory_nonlinear + 1):
+                X_shifted_pow = torch.roll(X_pow_k, j, dims=1)
+                X_shifted_pow[:, :j] = 0.0
+                batched_regressor_cols.append(X_shifted_pow)
+                
+        # Cross-terms
+        for k in range(2, self.nonlinearity_order + 1):
+            X_pow_k = X_powers[k - 1]
+            for j in range(self.memory_nonlinear + 1):
+                X_shifted_base = torch.roll(X, j, dims=1)
+                X_shifted_base[:, : (j)] = 0.0
+                for d in range(1, self.cross_term_depth + 1):
+                    X_shifted_pow = torch.roll(X_pow_k, j + d, dims=1)
+                    X_shifted_pow[:, : (j + d)] = 0.0
+                    cross_term = X_shifted_pow * X_shifted_base
+                    batched_regressor_cols.append(cross_term)
+
+        stack = torch.stack(batched_regressor_cols) # [features, B, T]
+        stack = stack.permute(1, 2, 0) # [B, T, features]
+        A = stack.reshape(regressor_length, num_regressors)
+        return A.to(self.device)
+
+    def show_terms(self, plot=False):
+        weights = self.weights.detach().cpu()
+        terms = []
+        linear_weights = []
+        idx = 0
+        for i in range(self.memory_linear + 1):
+            terms.append(f"x[{-i}]")
+            linear_weights.append(weights[idx].item())
+            idx += 1
+        if plot:
+            plt.plot(linear_weights)
+            plt.title("Plot of Linear Weights vs. Memory Length")
+            plt.xlabel("Memory Tap")
+            plt.ylabel("Weight Value")
+            plt.show()
+
+        for k in range(2, self.nonlinearity_order + 1):
+            k_th_weights = []
+            for j in range(self.memory_nonlinear + 1):
+                terms.append(f"x[{-j}]^{k}")
+                k_th_weights.append(weights[idx].item())
+                idx += 1
+
+            if plot:
+                plt.plot(k_th_weights)
+                plt.title(f"Plot of Weights Order {k} vs. Memory Length")
+                plt.xlabel("Memory Tap")
+                plt.ylabel("Weight Value")
+                plt.show()
+
+        # Cross-terms
+        for k in range(2, self.nonlinearity_order + 1):
+            for j in range(self.memory_nonlinear + 1):
+                for d in range(1, self.cross_term_depth + 1):
+                    terms.append(f"x[{-(j)}] * x[{-(j + d)}]^{k - 1}")
+                    idx += 1
+
+        weights = None
+        if self.weights is not None:
+            weights = self.weights.detach().cpu().tolist()
+
+        return terms, weights

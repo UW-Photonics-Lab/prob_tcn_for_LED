@@ -1,1 +1,0 @@
-NOISY_STATE = {}
