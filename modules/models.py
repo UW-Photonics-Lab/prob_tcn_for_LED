@@ -371,6 +371,92 @@ class LRU_channel(nn.Module):
         return total_params
 
 
+class LSTM_channel(nn.Module):
+    '''Stacked LSTM channel model
+    '''
+    def __init__(self, hidden_dim=64, n_layers=2, dropout=0.0,
+                 learn_noise=False, gaussian=True):
+        super().__init__()
+        self.learn_noise = learn_noise
+        self.gaussian = gaussian
+
+        self.encoder = nn.Linear(1, hidden_dim)               # per-timestep 1 -> H
+        self.lstm = nn.LSTM(hidden_dim, hidden_dim, num_layers=n_layers,
+                            batch_first=True, dropout=dropout if n_layers > 1 else 0.0)
+        out_channels = 2 if (learn_noise and gaussian) else 1
+        self.readout = nn.Linear(hidden_dim, out_channels)
+        self.receptive_field = 1
+
+    def forward(self, xin):
+        # xin: [B, T]
+        x = self.encoder(xin.unsqueeze(-1))                   # [B, T, H]
+        x, _ = self.lstm(x)                                   # [B, T, H]
+        out = self.readout(x)                                 # [B, T, out_channels]
+
+        mean_out = out[..., 0]                                # [B, T]
+        mean_out = mean_out - mean_out.mean(dim=1, keepdim=True)
+        if not self.learn_noise:
+            return mean_out
+
+        std_out = torch.exp(torch.clamp(out[..., 1], min=-15.0, max=10.0))
+        z = torch.randn_like(mean_out)
+        noisy_out = mean_out + std_out * z
+        nu_out = torch.full_like(mean_out, float('inf'))      # nu = inf for Gaussian
+        return noisy_out, mean_out, std_out, nu_out
+
+    def get_num_params(self):
+        total_params = 0
+        for param in self.parameters():
+            total_params += param.numel()
+        return total_params
+
+
+class TTHNet_channel(nn.Module):
+    '''Two tributaries heterogeneous NN channel model. A linear tributary and a
+    ReLU tributary over a symmetric (non-causal) window of samples,
+    summed.
+    '''
+    def __init__(self, window, hidden1, hidden2,
+                 learn_noise=False, gaussian=True):
+        super().__init__()
+        self.learn_noise = learn_noise
+        self.gaussian = gaussian
+        self.receptive_field = window
+        pad = window // 2
+
+        self.lin1 = nn.Conv1d(1, hidden1, kernel_size=window, padding=pad)
+        self.lin2 = nn.Conv1d(hidden1, hidden2, kernel_size=1)
+        self.nl1 = nn.Conv1d(1, hidden1, kernel_size=window, padding=pad)
+        self.nl2 = nn.Conv1d(hidden1, hidden2, kernel_size=1)
+
+        out_channels = 2 if (learn_noise and gaussian) else 1
+        self.readout = nn.Conv1d(hidden2, out_channels, kernel_size=1)
+
+    def forward(self, xin):
+        x = xin.unsqueeze(1)                                  # [B, 1, T]
+
+        lin = self.lin2(self.lin1(x))
+        nl = F.relu(self.nl2(F.relu(self.nl1(x))))
+        out = self.readout(lin + nl)                          # [B, out_channels, T]
+
+        mean_out = out[:, 0, :]                                # [B, T]
+        mean_out = mean_out - mean_out.mean(dim=1, keepdim=True)
+        if not self.learn_noise:
+            return mean_out
+
+        std_out = torch.exp(torch.clamp(out[:, 1, :], min=-15.0, max=10.0))
+        z = torch.randn_like(mean_out)
+        noisy_out = mean_out + std_out * z
+        nu_out = torch.full_like(mean_out, float('inf'))      # nu = inf for Gaussian
+        return noisy_out, mean_out, std_out, nu_out
+
+    def get_num_params(self):
+        total_params = 0
+        for param in self.parameters():
+            total_params += param.numel()
+        return total_params
+
+
 class memory_polynomial_channel(nn.Module):
     def __init__(self,
                  weights,

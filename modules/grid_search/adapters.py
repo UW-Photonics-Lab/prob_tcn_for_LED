@@ -12,7 +12,9 @@ import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
-from modules.models import TCN_channel, GeneralizedMemoryPolynomial, LRU_channel
+from modules.models import (
+    TCN_channel, GeneralizedMemoryPolynomial, LRU_channel, LSTM_channel, TTHNet_channel,
+)
 
 
 _DIST_TO_FLAGS = {
@@ -239,6 +241,38 @@ class LRUAdapter(TCNAdapter):
         return cls(model, train_params, device, shared=shared)
 
 
+class LSTMAdapter(TCNAdapter):
+    '''Stacked-LSTM channel baseline. Trains like the TCN; swaps in LSTM_channel.'''
+    name = "lstm"
+    ARCH_KEYS = ("hidden_dim", "n_layers", "dropout",
+                 "distribution", "learn_noise", "gaussian")
+
+    @classmethod
+    def from_config(cls, params: dict, device: str, shared: dict = None) -> "LSTMAdapter":
+        arch = {k: params[k] for k in cls.ARCH_KEYS if k in params}
+        if "distribution" in arch:
+            arch.update(_DIST_TO_FLAGS[arch.pop("distribution")])
+        model = LSTM_channel(**arch).to(device)
+        train_params = {k: params[k] for k in cls.TRAIN_KEYS if k in params}
+        return cls(model, train_params, device, shared=shared)
+
+
+class TTHNetAdapter(TCNAdapter):
+    '''Two tributaries heterogeneous NN baseline. Trains like the TCN; swaps in TTHNet_channel.'''
+    name = "tthnet"
+    ARCH_KEYS = ("window", "hidden1", "hidden2",
+                 "distribution", "learn_noise", "gaussian")
+
+    @classmethod
+    def from_config(cls, params: dict, device: str, shared: dict = None) -> "TTHNetAdapter":
+        arch = {k: params[k] for k in cls.ARCH_KEYS if k in params}
+        if "distribution" in arch:
+            arch.update(_DIST_TO_FLAGS[arch.pop("distribution")])
+        model = TTHNet_channel(**arch).to(device)
+        train_params = {k: params[k] for k in cls.TRAIN_KEYS if k in params}
+        return cls(model, train_params, device, shared=shared)
+
+
 class GMPAdapter:
     name = "gmp"
     ARCH_KEYS = ("memory_linear", "memory_nonlinear", "nonlinearity_order", "cross_term_depth")
@@ -289,5 +323,7 @@ class GMPAdapter:
 MODEL_REGISTRY = {
     TCNAdapter.name: TCNAdapter,
     LRUAdapter.name: LRUAdapter,
+    LSTMAdapter.name: LSTMAdapter,
+    TTHNetAdapter.name: TTHNetAdapter,
     GMPAdapter.name: GMPAdapter,
 }

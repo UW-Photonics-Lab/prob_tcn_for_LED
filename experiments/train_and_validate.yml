@@ -140,6 +140,68 @@ CHANNEL_GRID_SEARCH:
         distribution: ["gaussian"]
         beta_nll: [0.5, 1]
 
+    - model: gmp            # generalized memory polynomial, closed-form
+      params:
+        memory_linear: [20, 40]
+        memory_nonlinear: [8, 16]
+        nonlinearity_order: [3, 5]
+        cross_term_depth: [0, 2]
+        ridge: 1.0e-3
+
+    - model: lstm           # RF=1 (nonprob)
+      params:
+        hidden_dim: [6, 10, 16, 25, 40]
+        n_layers: 2
+        dropout: 0.1
+        epochs: 200
+        lr: 1.0e-3
+        batch_size: 16
+        factor: 0.5 # Learning rate scheduler
+        patience: 25
+        min_lr: 1.0e-6
+        distribution: ["none"]
+
+    - model: lstm           # RF=1 (Gaussian)
+      params:
+        hidden_dim: [6, 10, 16, 25, 40]
+        n_layers: 2
+        dropout: 0.1
+        epochs: 200
+        lr: 1.0e-3
+        batch_size: 16
+        factor: 0.5
+        patience: 25
+        min_lr: 1.0e-6
+        distribution: ["gaussian"]
+        beta_nll: [0.5, 1]
+
+    - model: tthnet         # window matched to TCN base-3 RF=281 (nonprob)
+      params:
+        window: [281]
+        hidden1: [8, 12, 16, 24]
+        hidden2: [4, 8, 12]
+        epochs: 200
+        lr: 1.0e-3
+        batch_size: 16
+        factor: 0.5 # Learning rate scheduler
+        patience: 25
+        min_lr: 1.0e-6
+        distribution: ["none"]
+
+    - model: tthnet         # window matched to TCN base-3 RF=281 (Gaussian)
+      params:
+        window: [281]
+        hidden1: [8, 12, 16, 24]
+        hidden2: [4, 8, 12]
+        epochs: 200
+        lr: 1.0e-3
+        batch_size: 16
+        factor: 0.5
+        patience: 25
+        min_lr: 1.0e-6
+        distribution: ["gaussian"]
+        beta_nll: [0.5, 1]
+
 ENCODER_DECODER:
   CONSTELLATION: qpsk
   PREAMBLE_AMPLITUDE: 3.0     # encoder output is clamped to +-this
