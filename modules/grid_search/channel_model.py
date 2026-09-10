@@ -57,6 +57,7 @@ class ChannelModelGridSearch(GridSearchBase):
 
         self.dataset_path = Path(dataset_path)
         self.val_fraction = float(grid_config.get("VAL_FRACTION", val_fraction or 0.0))
+        self.eval_chunk_size = int(grid_config["EVAL_CHUNK_SIZE"])
         self.ofdm_config = None  # set in _prepare; needed for the frequency-resolved val plot
 
         points = expand_grid(grid_config["models"])
@@ -122,14 +123,28 @@ class ChannelModelGridSearch(GridSearchBase):
         return X[train_idx], Y[train_idx], X[val_idx], Y[val_idx]
 
     def _evaluate(self, adapter, X, Y) -> dict:
-        y_pred = adapter.predict(X)
-        if isinstance(y_pred, tuple):  # TCN learn_noise: (noisy, mean, std, nu)
-            y_pred = y_pred[1]
-        Y = Y.to(y_pred.device)
-        if getattr(adapter, "exclude_warmup", False):
-            s = adapter._warmup_slice(y_pred.shape[-1])
-            y_pred, Y = y_pred[..., s:], Y[..., s:]
-        return {"per_burst_rrmse_pct": calculate_per_burst_rrmse_pct_loss(Y, y_pred)}
+        '''Per-burst rRMSE over the whole split, accumulated one chunk at a time.'''
+        weighted_rrmse = 0.0
+        total_bursts = 0
+        for start in range(0, X.shape[0], self.eval_chunk_size):
+            sent_chunk = X[start:start + self.eval_chunk_size]
+            received_chunk = Y[start:start + self.eval_chunk_size]
+
+            predicted_chunk = adapter.predict(sent_chunk)
+            if isinstance(predicted_chunk, tuple):  # TCN learn_noise: (noisy, mean, std, nu)
+                predicted_chunk = predicted_chunk[1]
+            received_chunk = received_chunk.to(predicted_chunk.device)
+
+            if getattr(adapter, "exclude_warmup", False):
+                warmup = adapter._warmup_slice(predicted_chunk.shape[-1])
+                predicted_chunk = predicted_chunk[..., warmup:]
+                received_chunk = received_chunk[..., warmup:]
+
+            chunk_rrmse = calculate_per_burst_rrmse_pct_loss(received_chunk, predicted_chunk)
+            weighted_rrmse += chunk_rrmse * sent_chunk.shape[0]
+            total_bursts += sent_chunk.shape[0]
+
+        return {"per_burst_rrmse_pct": weighted_rrmse / total_bursts}
 
     # ----------------------------------------------------------------- run
     def _run_point(self, point, run_dir, context) -> dict:
@@ -172,9 +187,6 @@ class ChannelModelGridSearch(GridSearchBase):
     def _val_evm_per_carrier(self, adapter, X_val, Y_val):
         '''Per-active-carrier EVM% of the model's mean prediction against the real received
         symbol on the held-out validation split, i.e. the frequency-resolved val error.'''
-        predicted = adapter.predict(X_val)
-        if isinstance(predicted, tuple):
-            predicted = predicted[1]
         cyclic_prefix_length = self.ofdm_config.cyclic_prefix_length
         active = self.ofdm_config.active_carrier_indices.cpu().numpy()
 
@@ -182,9 +194,19 @@ class ChannelModelGridSearch(GridSearchBase):
             payload = symbol_block[:, cyclic_prefix_length:].detach().cpu().numpy()
             return np.fft.fft(payload, norm="ortho", axis=1)[:, active]
 
-        real = carrier_symbols(Y_val)
-        modelled = carrier_symbols(predicted)
-        return np.sqrt((np.abs(modelled - real) ** 2).mean(0) / (np.abs(real) ** 2).mean(0)) * 100
+        residual_power_sum = np.zeros(len(active))
+        reference_power_sum = np.zeros(len(active))
+        for start in range(0, X_val.shape[0], self.eval_chunk_size):
+            predicted_chunk = adapter.predict(X_val[start:start + self.eval_chunk_size])
+            if isinstance(predicted_chunk, tuple):
+                predicted_chunk = predicted_chunk[1]
+
+            real = carrier_symbols(Y_val[start:start + self.eval_chunk_size])
+            modelled = carrier_symbols(predicted_chunk)
+            residual_power_sum += (np.abs(modelled - real) ** 2).sum(0)
+            reference_power_sum += (np.abs(real) ** 2).sum(0)
+
+        return np.sqrt(residual_power_sum / reference_power_sum) * 100
 
     def _plot_val_evm_vs_frequency(self, top_k=8):
         '''Final experiment plot: per-carrier validation EVM% vs frequency for the best

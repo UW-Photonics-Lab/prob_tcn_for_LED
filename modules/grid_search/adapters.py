@@ -91,6 +91,7 @@ class TCNAdapter:
         self.device = device
         self.shared = shared or {}
         self.beta_nll = float(self.train_params.get("beta_nll", self.shared.get("BETA_NLL", 0.0)))
+        self.eval_chunk_size = int(self.shared["EVAL_CHUNK_SIZE"])
 
     @classmethod
     def from_config(cls, params: dict, device: str, shared: dict = None) -> "TCNAdapter":
@@ -130,12 +131,20 @@ class TCNAdapter:
     def _val_loss(self, X_val, Y_val) -> float:
         '''True power-weighted NLL (beta=0), NOT the beta-NLL training value: the
         beta-weighted number is sigma-scale-dependent and rises as sigma shrinks,
-        which misleads the LR scheduler and cross-run val_nll comparisons.'''
+        which misleads the LR scheduler and cross-run val_nll comparisons.
+
+        Evaluated in chunks and recombined as a burst-count-weighted mean'''
         self.model.eval()
+        total_loss = 0.0
+        total_bursts = 0
         with torch.no_grad():
-            loss = self._loss(X_val, Y_val, beta=0).item()
+            for start in range(0, X_val.shape[0], self.eval_chunk_size):
+                sent_chunk = X_val[start:start + self.eval_chunk_size]
+                received_chunk = Y_val[start:start + self.eval_chunk_size]
+                total_loss += self._loss(sent_chunk, received_chunk, beta=0).item() * sent_chunk.shape[0]
+                total_bursts += sent_chunk.shape[0]
         self.model.train()
-        return loss
+        return total_loss / total_bursts
 
     def val_nll(self, X, Y):
         '''Validation negative log-likelihood for probabilistic (learn_noise)
@@ -205,9 +214,16 @@ class TCNAdapter:
         return history
 
     def predict(self, X):
+        '''Chunked forward pass'''
         self.model.eval()
+        chunk_outputs = []
         with torch.no_grad():
-            return self.model(X.to(self.device))
+            for start in range(0, X.shape[0], self.eval_chunk_size):
+                chunk_outputs.append(self.model(X[start:start + self.eval_chunk_size].to(self.device)))
+
+        if isinstance(chunk_outputs[0], tuple):
+            return tuple(torch.cat(parts) for parts in zip(*chunk_outputs))
+        return torch.cat(chunk_outputs)
 
     def num_params(self) -> int:
         return self.model.get_num_params()
@@ -283,6 +299,7 @@ class GMPAdapter:
         self.fit_params = fit_params
         self.device = device
         self.shared = shared or {}
+        self.eval_chunk_size = int(self.shared["EVAL_CHUNK_SIZE"])
 
     @classmethod
     def from_config(cls, params: dict, device: str, shared: dict = None) -> "GMPAdapter":

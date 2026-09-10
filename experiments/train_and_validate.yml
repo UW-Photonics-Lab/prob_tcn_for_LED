@@ -2,8 +2,7 @@ RUNTIME:
   DEVICE: cuda
   SEED: 0
 
-CHANNEL_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/light_sea_channel_models_20260813_2059
-# ENCODER_DECODER_EXP_DIR:
+CHANNEL_EXP_DIR:
 HARDWARE_RESOURCES:
     Agilent_33250A:
         DRIVER_PATH: pyflux.hardware.drivers
@@ -16,9 +15,9 @@ HARDWARE_RESOURCES:
         ID: HEWLETT-PACKARD,E3631A,0,2.1-5.0-1.0
 DATA_COLLECTION: 
   N: 10000 # Number of datapoints collected at the DC offset
-  DC_OFFSETS: [0.120] # A (single offset per dataset)
-  F_MINS: [1e6] # Hz
-  F_MAXS: [13e6] # Hz Here are the max freqs used in order of DC offset [7.6e6, 9.2e6, 10.8e6, 13e6]
+  DC_OFFSETS: [0.050] # A (single offset per dataset)
+  F_MINS: [1.0e+6] # Hz
+  F_MAXS: [7.6e+6] # Hz Here are the max freqs used in order of DC offset [7.6e6, 9.2e6, 10.8e6, 13e6]
   OSC_SAMPLE_RATES: [500e6] # Hz
   SUBCARRIER_SPACING: 100e3 # Hz
   UPSAMPLE_FACTOR: 4
@@ -30,48 +29,16 @@ DATA_COLLECTION:
   POWER_MIN: 0.1  # minimum symbol power
   POWER_MAX: 1.5  # maximum symbol power
   JITTER_POWER: 0 # off-constellation complex noise on symbols (collection only); 0 disables
-  DATASET_PATH: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/sweeps/mild_star_dc0.12A_fmin1e+06_fmax1.3e+07_20260802_2119.zarr
+  DATASET_PATH: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/sweeps/prime_coast_dc0.05A_fmin1e+06_fmax7.6e+06_20260724_2101.zarr
   CLIP_THRESHOLD: 3.0 # clip the AWG output to +/-this value (V)
 
 CHANNEL_GRID_SEARCH:
   VAL_FRACTION: 0.1
+  EVAL_CHUNK_SIZE: 512  # bursts per forward pass during evaluation
   SELECTION_MODE: best_per_size  # "best" or "best_per_size" or "all"
   PROB_SELECTION_KEY: val_per_burst_rrmse_pct  # for probabilistic models, the metric used to select the best run
                             
   models:
-    - model: tcn            # base 2: 6 layers, k8, RF=442 (nonprob)
-      params:
-        nlayers: [6]
-        hidden_channels: [5, 7, 9, 12, 17]
-        kernel_size: [8]
-        dilation_base: 2
-        weight_norm: [true]
-        activation: [gelu]
-        epochs: 200
-        lr: 1.0e-3
-        batch_size: 16
-        factor: 0.5 # Learning rate scheduler
-        patience: 25
-        min_lr: 1.0e-6
-        distribution: ["none"]
-
-    - model: tcn            # base 2: 6 layers, k8, RF=442 (Gaussian)
-      params:
-        nlayers: [6]
-        hidden_channels: [5, 7, 9, 12, 17]
-        kernel_size: [8]
-        dilation_base: 2
-        weight_norm: [true]
-        activation: [gelu]
-        epochs: 200
-        lr: 1.0e-3
-        batch_size: 16
-        factor: 0.5 # Learning rate scheduler
-        patience: 25
-        min_lr: 1.0e-6
-        distribution: ["gaussian"]
-        beta_nll: [0.5, 1]
-
     - model: tcn            # base 3: 4 layers, k8, RF=281 (nonprob)
       params:
         nlayers: [4]
@@ -103,7 +70,7 @@ CHANNEL_GRID_SEARCH:
         patience: 25
         min_lr: 1.0e-6
         distribution: ["gaussian"]
-        beta_nll: [0.5, 1]
+        beta_nll: [1]
 
     - model: lru   # Linear Recurrent Unit
       params:
@@ -138,19 +105,19 @@ CHANNEL_GRID_SEARCH:
         patience: 25
         min_lr: 1.0e-6
         distribution: ["gaussian"]
-        beta_nll: [0.5, 1]
+        beta_nll: [1]
 
     - model: gmp            # generalized memory polynomial, closed-form
       params:
-        memory_linear: [20, 40]
-        memory_nonlinear: [8, 16]
-        nonlinearity_order: [3, 5]
-        cross_term_depth: [0, 2]
+        memory_linear: [281]
+        memory_nonlinear: [281]
+        nonlinearity_order: [4]
+        cross_term_depth: [0, 1, 2, 3, 7]
         ridge: 1.0e-3
 
     - model: lstm           # RF=1 (nonprob)
       params:
-        hidden_dim: [6, 10, 16, 25, 40]
+        hidden_dim: [7, 11, 15, 22, 31]
         n_layers: 2
         dropout: 0.1
         epochs: 200
@@ -163,7 +130,7 @@ CHANNEL_GRID_SEARCH:
 
     - model: lstm           # RF=1 (Gaussian)
       params:
-        hidden_dim: [6, 10, 16, 25, 40]
+        hidden_dim: [7, 11, 15, 22, 31]
         n_layers: 2
         dropout: 0.1
         epochs: 200
@@ -173,13 +140,13 @@ CHANNEL_GRID_SEARCH:
         patience: 25
         min_lr: 1.0e-6
         distribution: ["gaussian"]
-        beta_nll: [0.5, 1]
+        beta_nll: [1]
 
     - model: tthnet         # window matched to TCN base-3 RF=281 (nonprob)
       params:
         window: [281]
-        hidden1: [8, 12, 16, 24]
-        hidden2: [4, 8, 12]
+        hidden1: [2, 4, 7, 14, 29]
+        hidden2: [4]
         epochs: 200
         lr: 1.0e-3
         batch_size: 16
@@ -191,8 +158,8 @@ CHANNEL_GRID_SEARCH:
     - model: tthnet         # window matched to TCN base-3 RF=281 (Gaussian)
       params:
         window: [281]
-        hidden1: [8, 12, 16, 24]
-        hidden2: [4, 8, 12]
+        hidden1: [2, 4, 7, 14, 29]
+        hidden2: [4]
         epochs: 200
         lr: 1.0e-3
         batch_size: 16
@@ -200,7 +167,7 @@ CHANNEL_GRID_SEARCH:
         patience: 25
         min_lr: 1.0e-6
         distribution: ["gaussian"]
-        beta_nll: [0.5, 1]
+        beta_nll: [1]
 
 ENCODER_DECODER:
   CONSTELLATION: qpsk
@@ -220,7 +187,7 @@ ENCODER_DECODER:
     factor: 0.5 # Learning rate scheduler
     patience: 25
     min_lr: 1.0e-6
-    drive_mean_power_weight: [1.0e-5]
+    drive_mean_power_weight: [1.0e-3]
     kurtosis_weight: [1.0e-1]     # stiffness of the pull toward kurtosis_target, not a force.
     kurtosis_target: [3.0]
 
