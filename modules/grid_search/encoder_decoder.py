@@ -46,6 +46,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
         self.channel_models = {cm["run_id"]: cm for cm in channel_models}
         self.constellation = get_constellation(grid_config["constellation"])
         self.preamble_amplitude = float(grid_config["preamble_amplitude"])
+        self.eval_chunk_size = int(grid_config["eval_chunk_size"])
         self.clip_threshold = float(clip_threshold)
         self.preamble_length = preamble_length
 
@@ -107,7 +108,9 @@ class EncoderDecoderGridSearch(GridSearchBase):
         self.preamble = torch.tensor(preamble, dtype=torch.float32, device=self.device).unsqueeze(0)
         loaded = {}
         for run_id, cm in self.channel_models.items():
-            model = MODEL_REGISTRY[cm["model"]].load(cm["params"], cm["checkpoint"], self.device).model
+            model = MODEL_REGISTRY[cm["model"]].load(
+                cm["params"], cm["checkpoint"], self.device,
+                shared={"EVAL_CHUNK_SIZE": self.eval_chunk_size}).model
             for p in model.parameters():
                 p.requires_grad_(False)
             loaded[run_id] = model
@@ -129,7 +132,9 @@ class EncoderDecoderGridSearch(GridSearchBase):
         pre = self.preamble_length
         preamble, symbol = sent_time[:, :pre], sent_time[:, pre:]
         encoded_symbol = encoder(symbol).clamp(-self.clip_threshold, self.clip_threshold)
-        channel_out = channel_model(encoded_symbol)
+
+        with torch.backends.cudnn.flags(enabled=False):
+            channel_out = channel_model(encoded_symbol)
         if isinstance(channel_out, tuple):
             # probabilistic channel: scale the sampled noise realization around the mean
             # so training noise can be annealed (noise_scale 1 = full noise, 0 = mean only)

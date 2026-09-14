@@ -2,7 +2,7 @@ RUNTIME:
   DEVICE: cuda
   SEED: 0
 
-CHANNEL_EXP_DIR:
+CHANNEL_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/late_flare_channel_models_20260910_1657
 HARDWARE_RESOURCES:
     Agilent_33250A:
         DRIVER_PATH: pyflux.hardware.drivers
@@ -173,6 +173,7 @@ ENCODER_DECODER:
   CONSTELLATION: qpsk
   PREAMBLE_AMPLITUDE: 3.0     # encoder output is clamped to +-this
   RUNS_PER_ARCH: 10
+  EVAL_CHUNK_SIZE: 512  # bursts per forward pass when a reloaded channel model is evaluated
   params:
     nlayers: [2]
     dilation_base: [2]
