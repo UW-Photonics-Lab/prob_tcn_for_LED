@@ -6,6 +6,7 @@ Edit RUN_CONFIGS and PLOT_PATH at the top, then:
     python summarize_results.py
 """
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -13,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
+from matplotlib.ticker import LogLocator, NullFormatter
 import seaborn as sns
 from scipy import stats
 import zarr
@@ -30,36 +32,39 @@ RUN_CONFIGS = [
     {
         "label": "50 mA",
         "dc_ma": 50,
-        "channel_exp_dir": "data/experiments/train_and_validate/raw_storm_channel_models_20260808_1526",
-        "ed_exp_dir":      "data/experiments/train_and_validate/raw_storm_encoder_decoder_20260809_0306",
-        "ed_val_exp_dir":  "data/experiments/train_and_validate/raw_storm_ed_validation_20260809_0426",
+        "channel_exp_dir": "data/experiments/train_and_validate/nice_rain_channel_models_20260915_2032",
+        "ed_exp_dir":      "data/experiments/train_and_validate/nice_rain_encoder_decoder_20260916_0654",
+        "ed_val_exp_dir":  "data/experiments/train_and_validate/nice_rain_ed_validation_20260917_1929",
         "dataset_path":    "data/sweeps/prime_coast_dc0.05A_fmin1e+06_fmax7.6e+06_20260724_2101.zarr",
     },
-    {
-        "label": "60 mA",
-        "dc_ma": 60,
-        "channel_exp_dir": "data/experiments/train_and_validate/tiny_cliff_channel_models_20260810_1622",
-        "ed_exp_dir":      "data/experiments/train_and_validate/tiny_cliff_encoder_decoder_20260811_0335",
-        "ed_val_exp_dir":  "data/experiments/train_and_validate/tiny_cliff_ed_validation_20260811_0457",
-        "dataset_path":    "data/sweeps/fair_ledge_dc0.06A_fmin1e+06_fmax9.2e+06_20260726_1115.zarr",
-    },
-    {
-        "label": "80 mA",
-        "dc_ma": 80,
-        "channel_exp_dir": "data/experiments/train_and_validate/fleet_sand_channel_models_20260812_1903",
-        "ed_exp_dir":      "data/experiments/train_and_validate/calm_coast_encoder_decoder_20260815_1103",
-        "ed_val_exp_dir":  "data/experiments/train_and_validate/calm_coast_ed_validation_20260815_1237",
-        "dataset_path":    "data/sweeps/calm_heath_dc0.08A_fmin1e+06_fmax1.08e+07_20260729_1339.zarr",
-    },
-    {
-        "label": "120 mA",
-        "dc_ma": 120,
-        "channel_exp_dir": "data/experiments/train_and_validate/light_sea_channel_models_20260813_2059",
-        "ed_exp_dir":      "data/experiments/train_and_validate/tame_flare_encoder_decoder_20260816_2213",
-        "ed_val_exp_dir":  "data/experiments/train_and_validate/tame_flare_ed_validation_20260817_0004",
-        "dataset_path":    "data/sweeps/mild_star_dc0.12A_fmin1e+06_fmax1.3e+07_20260802_2119.zarr",
-    },
+    # {
+    #     "label": "60 mA",
+    #     "dc_ma": 60,
+    #     "channel_exp_dir": "data/experiments/train_and_validate/tiny_cliff_channel_models_20260810_1622",
+    #     "ed_exp_dir":      "data/experiments/train_and_validate/tiny_cliff_encoder_decoder_20260811_0335",
+    #     "ed_val_exp_dir":  "data/experiments/train_and_validate/tiny_cliff_ed_validation_20260811_0457",
+    #     "dataset_path":    "data/sweeps/fair_ledge_dc0.06A_fmin1e+06_fmax9.2e+06_20260726_1115.zarr",
+    # },
+    # {
+    #     "label": "80 mA",
+    #     "dc_ma": 80,
+    #     "channel_exp_dir": "data/experiments/train_and_validate/fleet_sand_channel_models_20260812_1903",
+    #     "ed_exp_dir":      "data/experiments/train_and_validate/calm_coast_encoder_decoder_20260815_1103",
+    #     "ed_val_exp_dir":  "data/experiments/train_and_validate/calm_coast_ed_validation_20260815_1237",
+    #     "dataset_path":    "data/sweeps/calm_heath_dc0.08A_fmin1e+06_fmax1.08e+07_20260729_1339.zarr",
+    # },
+    # {
+    #     "label": "120 mA",
+    #     "dc_ma": 120,
+    #     "channel_exp_dir": "data/experiments/train_and_validate/light_sea_channel_models_20260813_2059",
+    #     "ed_exp_dir":      "data/experiments/train_and_validate/tame_flare_encoder_decoder_20260816_2213",
+    #     "ed_val_exp_dir":  "data/experiments/train_and_validate/tame_flare_ed_validation_20260817_0004",
+    #     "dataset_path":    "data/sweeps/mild_star_dc0.12A_fmin1e+06_fmax1.3e+07_20260802_2119.zarr",
+    # },
 ]
+
+# Restrict which channel-model families appear in the plots. None means all.
+MODELS_TO_PLOT: set[str] | None = None
 
 PLOT_PATH       = Path(__file__).resolve().parent.parent / "data/plots"
 DEVICE          = os.environ.get("SUMMARIZE_DEVICE", "cpu")
@@ -115,12 +120,15 @@ _CMAP = plt.get_cmap("viridis")
 
 MODEL_STYLES: dict[tuple[str, str], dict] = {
     ("gmp", "none"):       {"color": "#333333", "marker": "o", "linestyle": "-"},
+    ("tthnet", "none"):    {"color": "#8C564B", "marker": "h", "linestyle": "-"},
     ("tcn", "none"):       {"color": "#0072B2", "marker": "^", "linestyle": "--"},
     ("tcn", "gaussian"):   {"color": "#E69F00", "marker": "s", "linestyle": "-."},
     ("tcn", "students_t"): {"color": "#D55E00", "marker": "D", "linestyle": ":"},
     ("lru", "none"):       {"color": "#009E73", "marker": "p", "linestyle": "--"},
     ("lru", "gaussian"):   {"color": "#CC79A7", "marker": "X", "linestyle": "-."},
     ("lru", "students_t"): {"color": "#56B4E9", "marker": "v", "linestyle": ":"},
+    ("lstm", "none"):      {"color": "#9467BD", "marker": "<", "linestyle": "--"},
+    ("lstm", "gaussian"):  {"color": "#17BECF", "marker": ">", "linestyle": "-."},
 }
 _FALLBACK_STYLES = [
     {"color": "#F0E442", "marker": "*", "linestyle": "-"},
@@ -285,31 +293,66 @@ def _model_type_label(model: str, dist: str) -> str:
 
 
 def _model_type_sort_key(mt: tuple[str, str]) -> tuple:
-    return ({"gmp": 0, "tcn": 1}.get(mt[0], 99),
+    return ({"gmp": 0, "tthnet": 1, "tcn": 2, "lru": 3, "lstm": 4}.get(mt[0], 99),
             {"none": 0, "gaussian": 1, "students_t": 2}.get(mt[1], 99))
+
+
+def _include_model(model: str) -> bool:
+    return MODELS_TO_PLOT is None or model in MODELS_TO_PLOT
 
 
 def _discover_model_types(run_configs: list[dict]) -> list[tuple[str, str]]:
     seen = []
     for cfg in run_configs:
         for r in load_channel_runs(cfg["channel_exp_dir"]):
+            if not _include_model(r["model"]):
+                continue
             mt = (r["model"], r.get("distribution") or "none")
             if mt not in seen:
                 seen.append(mt)
     return sorted(seen, key=_model_type_sort_key)
 
 
-# PLOT 1 Val RRMSE vs Sent Power - 2×2 subplot grid, one panel per DC bias
+# Grid plots share one panel per DC bias. The grid is 1x1, 1x2, or 2x2 depending
+# on how many biases are active.
 _PANEL_LABELS = ["(a)", "(b)", "(c)", "(d)"]
+
+
+def _panel_grid(n: int, sharex: bool = True):
+    """Build a panel grid sized for n panels and return
+    (fig, axes_flat, needs_ylabel, needs_xlabel)."""
+    n_cols = min(n, 2)
+    n_rows = math.ceil(n / n_cols)
+    fig_width = _fw2 if n_cols == 2 else _fw2 / 2
+
+    fig, axes = plt.subplots(n_rows, n_cols,
+                             figsize=(fig_width, n_rows * _fh),
+                             sharex=sharex, sharey=True,
+                             constrained_layout=True, squeeze=False)
+    axes_flat = axes.flatten()
+
+    needs_ylabel = [panel_index % n_cols == 0 for panel_index in range(n)]
+    needs_xlabel = [panel_index >= n - n_cols for panel_index in range(n)]
+
+    for ax in axes_flat[n:]:
+        ax.set_visible(False)
+
+    return fig, axes_flat, needs_ylabel, needs_xlabel
+
+
+def _decade_only_log_xaxis(ax) -> None:
+    """Log x-axis labeled at decades only (10^3, 10^4), minor ticks unlabeled.
+    Leaves the limits autoscaled so the axis tracks the data range."""
+    ax.set_xscale("log")
+    ax.xaxis.set_major_locator(LogLocator(base=10))
+    ax.xaxis.set_minor_formatter(NullFormatter())
+
 
 def plot_val_rrmse_vs_power(run_configs: list[dict]) -> None:
     model_types = _discover_model_types(run_configs)
     n = len(run_configs)
 
-    fig, axes = plt.subplots(2, 2, figsize=(_fw2, 2 * _fh),
-                             sharex=True, sharey=True,
-                             constrained_layout=True)
-    axes_flat = axes.flatten()
+    fig, axes_flat, needs_ylabel, needs_xlabel = _panel_grid(n)
     for panel_index, cfg in enumerate(run_configs):
         ax = axes_flat[panel_index]
         X, Y = _load_preamble_stripped(cfg)
@@ -341,19 +384,15 @@ def plot_val_rrmse_vs_power(run_configs: list[dict]) -> None:
         ax.text(0.05, 0.95, _PANEL_LABELS[panel_index], transform=ax.transAxes,
                 fontsize=_FONT, va="top", ha="left")
         ax.tick_params(labelbottom=True)
-        if panel_index % 2 == 0:
+        if needs_ylabel[panel_index]:
             ax.set_ylabel("Val RRMSE (%)")
 
-        # x is shared, so only the bottom row of visible panels needs the label
-        if panel_index >= n - 2:
+        if needs_xlabel[panel_index]:
             ax.set_xlabel("Sent Power (Mean Squared Amplitude)")
 
     fig.suptitle(VAL_RRMSE_TITLE + _run_suffix(run_configs[0]), fontsize=_FONT)
 
     axes_flat[0].legend(fontsize=_FONT, handlelength=3, labelspacing=0.5)
-
-    for ax in axes_flat[n:]:
-        ax.set_visible(False)
 
     plt.savefig(PLOT_PATH / "val_rrmse_vs_power.svg", format="svg", bbox_inches="tight")
     plt.savefig(PLOT_PATH / "val_rrmse_vs_power.png", bbox_inches="tight")
@@ -364,10 +403,7 @@ def plot_val_rrmse_vs_power(run_configs: list[dict]) -> None:
 def plot_val_rrmse_vs_params(run_configs: list[dict]) -> None:
     n = len(run_configs)
 
-    fig, axes = plt.subplots(2, 2, figsize=(_fw2, 2 * _fh),
-                             sharex=True, sharey=True,
-                             constrained_layout=True)
-    axes_flat = axes.flatten()
+    fig, axes_flat, needs_ylabel, needs_xlabel = _panel_grid(n)
 
     for panel_index, cfg in enumerate(run_configs):
         ax = axes_flat[panel_index]
@@ -379,6 +415,8 @@ def plot_val_rrmse_vs_params(run_configs: list[dict]) -> None:
         traces: dict[tuple, list] = {}
         for run in runs:
             if run["run_id"] not in trained_channel_ids:
+                continue
+            if not _include_model(run["model"]):
                 continue
             key = (run["model"], run.get("distribution") or "none")
             traces.setdefault(key, []).append((run["num_params"], run["val_per_burst_rrmse_pct"]))
@@ -395,26 +433,22 @@ def plot_val_rrmse_vs_params(run_configs: list[dict]) -> None:
                     label=_model_type_label(model, dist))
 
         # channel sizes were chosen one per power-of-2 bucket, so a log axis spaces them evenly
-        ax.set_xscale("log")
+        _decade_only_log_xaxis(ax)
         ax.set_title(f"{cfg['dc_ma']} mA", fontsize=_FONT)
         ax.grid(True, which="both")
         ax.text(0.05, 0.95, _PANEL_LABELS[panel_index], transform=ax.transAxes,
                 fontsize=_FONT, va="top", ha="left")
         ax.tick_params(labelbottom=True)
-        if panel_index % 2 == 0:
+        if needs_ylabel[panel_index]:
             ax.set_ylabel("Val RRMSE (%)")
 
-        # x is shared, so only the bottom row of visible panels needs the label
-        if panel_index >= n - 2:
+        if needs_xlabel[panel_index]:
             ax.set_xlabel("Channel Model Parameter Count")
 
     fig.suptitle(VAL_RRMSE_VS_PARAMS_TITLE + _run_suffix(run_configs[0]), fontsize=_FONT)
 
     axes_flat[0].legend(fontsize=_SMALL, handlelength=2, markerscale=0.8,
                         labelspacing=0.3, borderpad=0.4)
-
-    for ax in axes_flat[n:]:
-        ax.set_visible(False)
 
     plt.savefig(PLOT_PATH / "val_rrmse_vs_params.svg", format="svg", bbox_inches="tight")
     plt.savefig(PLOT_PATH / "val_rrmse_vs_params.png", bbox_inches="tight")
@@ -425,14 +459,12 @@ def plot_val_rrmse_vs_params(run_configs: list[dict]) -> None:
 
 SEED_DOT_ALPHA = 0.2
 SEED_DOT_SIZE = 3
+PARETO_SHOW_SEED_DOTS = True   # scatter each E/D seed's EVM behind the pareto line
 
 def plot_pareto_evm(run_configs: list[dict]) -> None:
     n = len(run_configs)
 
-    fig, axes = plt.subplots(2, 2, figsize=(_fw2, 2 * _fh),
-                             sharex=True, sharey=True,
-                             constrained_layout=True)
-    axes_flat = axes.flatten()
+    fig, axes_flat, needs_ylabel, needs_xlabel = _panel_grid(n)
 
     for panel_index, cfg in enumerate(run_configs):
         ax = axes_flat[panel_index]
@@ -455,6 +487,8 @@ def plot_pareto_evm(run_configs: list[dict]) -> None:
             channel_run = channel_by_run_id.get(channel_run_id)
             if channel_run is None:
                 continue
+            if not _include_model(channel_run.get("model", "unknown")):
+                continue
             key = (channel_run.get("model", "unknown"), channel_run.get("distribution") or "none")
             traces.setdefault(key, []).append({
                 "num_params": channel_run["num_params"],
@@ -469,14 +503,6 @@ def plot_pareto_evm(run_configs: list[dict]) -> None:
             param_counts = np.array([point["num_params"] for point in points], dtype=float)
             median_evms = np.array([point["median_evm"] for point in points])
 
-            # every seed as a faint dot, so the spread is the uncertainty display
-            for point in points:
-                seed_evms = point["seed_evms"]
-                ax.plot(np.full(len(seed_evms), point["num_params"]), seed_evms,
-                        linestyle="none", marker="o", markersize=SEED_DOT_SIZE,
-                        markerfacecolor=style["color"], markeredgecolor="none",
-                        alpha=SEED_DOT_ALPHA, zorder=2)
-
             # solid line tracks the pareto front (best median so far with increasing params)
             pareto_evms = np.minimum.accumulate(median_evms)
             ax.plot(param_counts, pareto_evms, color=style["color"], linestyle="-",
@@ -487,28 +513,30 @@ def plot_pareto_evm(run_configs: list[dict]) -> None:
                     marker=style["marker"], markersize=3,
                     color=style["color"], alpha=0.85, zorder=4)
 
-        # the channel sizes were chosen one per power-of-2 bucket, so a log axis spaces
-        # them evenly instead of crowding everything below 3k into the left fifth
-        ax.set_xscale("log")
+            if PARETO_SHOW_SEED_DOTS:
+                for point in points:
+                    ax.plot(np.full(len(point["seed_evms"]), point["num_params"]),
+                            point["seed_evms"], linestyle="none", marker="o",
+                            markersize=SEED_DOT_SIZE, markerfacecolor=style["color"],
+                            markeredgecolor="none", alpha=SEED_DOT_ALPHA, zorder=2)
+
+        _decade_only_log_xaxis(ax)
+        ax.set_ylim(top=15)
         ax.set_title(f"{cfg['dc_ma']} mA", fontsize=_FONT)
         ax.grid(True, which="both")
         ax.text(0.05, 0.95, _PANEL_LABELS[panel_index], transform=ax.transAxes,
                 fontsize=_FONT, va="top", ha="left")
         ax.tick_params(labelbottom=True)
-        if panel_index % 2 == 0:
+        if needs_ylabel[panel_index]:
             ax.set_ylabel("Experimental EVM (%)")
 
-        # x is shared, so only the bottom row of visible panels needs the label
-        if panel_index >= n - 2:
+        if needs_xlabel[panel_index]:
             ax.set_xlabel("Channel Model Parameter Count")
 
     fig.suptitle(PARETO_TITLE + _run_suffix(run_configs[0]), fontsize=_FONT)
 
     axes_flat[0].legend(fontsize=_SMALL, handlelength=2, markerscale=0.8,
                         labelspacing=0.3, borderpad=0.4)
-
-    for ax in axes_flat[n:]:
-        ax.set_visible(False)
 
     plt.savefig(PLOT_PATH / "pareto_evm.svg", format="svg", bbox_inches="tight")
     plt.savefig(PLOT_PATH / "pareto_evm.png", bbox_inches="tight")
@@ -726,9 +754,7 @@ def _replay_predicted_trial_evms(cfg) -> dict[str, np.ndarray]:
 
 def plot_predicted_vs_actual_evm(run_configs: list[dict]) -> None:
     n = len(run_configs)
-    fig, axes = plt.subplots(2, 2, figsize=(_fw2, 2 * _fh),
-                             sharex=True, sharey=True, constrained_layout=True)
-    axes_flat = axes.flatten()
+    fig, axes_flat, needs_ylabel, needs_xlabel = _panel_grid(n)
 
     for panel_index, cfg in enumerate(run_configs):
         ax = axes_flat[panel_index]
@@ -764,19 +790,16 @@ def plot_predicted_vs_actual_evm(run_configs: list[dict]) -> None:
         ax.text(0.05, 0.95, _PANEL_LABELS[panel_index], transform=ax.transAxes,
                 fontsize=_FONT, va="top", ha="left")
         ax.tick_params(labelbottom=True)
-        if panel_index % 2 == 0:
+        if needs_ylabel[panel_index]:
             ax.set_ylabel("Actual EVM (%)")
 
-        # x is shared, so only the bottom row of visible panels needs the label
-        if panel_index >= n - 2:
+        if needs_xlabel[panel_index]:
             ax.set_xlabel("Predicted EVM (%)")
 
     fig.suptitle(PRED_VS_ACTUAL_TITLE + _run_suffix(run_configs[0]), fontsize=_FONT)
 
     axes_flat[0].legend(fontsize=_SMALL, handlelength=1.2, markerscale=0.9,
                         labelspacing=0.3, borderpad=0.4)
-    for ax in axes_flat[n:]:
-        ax.set_visible(False)
 
     plt.savefig(PLOT_PATH / "predicted_vs_actual_evm.svg", format="svg", bbox_inches="tight")
     plt.savefig(PLOT_PATH / "predicted_vs_actual_evm.png", bbox_inches="tight")
@@ -795,9 +818,7 @@ def noise_floor_evm_vs_frequency(ed_val_exp_dir, validation_run_id) -> np.ndarra
 def plot_best_ed_noise_floor(run_configs: list[dict]) -> None:
     n = len(run_configs)
 
-    fig, axes = plt.subplots(2, 2, figsize=(_fw2, 2 * _fh),
-                             sharex=False, sharey=True, constrained_layout=True)
-    axes_flat = axes.flatten()
+    fig, axes_flat, needs_ylabel, needs_xlabel = _panel_grid(n, sharex=False)
 
     y_max = 0.0
     for panel_index, cfg in enumerate(run_configs):
@@ -826,10 +847,10 @@ def plot_best_ed_noise_floor(run_configs: list[dict]) -> None:
                 f"{_PANEL_LABELS[panel_index]}  residual mean EVM% = {residual_mean:.1f}\n"
                 f"noise floor mean EVM% = {noise_floor_mean:.1f}",
                 transform=ax.transAxes, fontsize=_FONT, va="top", ha="left")
-        if panel_index % 2 == 0:
+        if needs_ylabel[panel_index]:
             ax.set_ylabel("EVM (%)")
 
-        if panel_index >= n - 2:
+        if needs_xlabel[panel_index]:
             ax.set_xlabel("Frequency (MHz)")
 
     axes_flat[0].set_ylim(0, y_max * 1.05)
@@ -837,9 +858,6 @@ def plot_best_ed_noise_floor(run_configs: list[dict]) -> None:
     fig.suptitle(NOISE_FLOOR_TITLE + _run_suffix(run_configs[0]), fontsize=_FONT)
 
     axes_flat[0].legend(fontsize=_SMALL, handlelength=2, labelspacing=0.3, borderpad=0.4)
-
-    for ax in axes_flat[n:]:
-        ax.set_visible(False)
 
     plt.savefig(PLOT_PATH / "best_ed_noise_floor.svg", format="svg", bbox_inches="tight")
     plt.savefig(PLOT_PATH / "best_ed_noise_floor.png", bbox_inches="tight")

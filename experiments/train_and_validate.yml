@@ -2,7 +2,9 @@ RUNTIME:
   DEVICE: cuda
   SEED: 0
 
-CHANNEL_EXP_DIR: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/experiments/train_and_validate/late_flare_channel_models_20260910_1657
+CHANNEL_EXP_DIR:
+ENCODER_DECODER_EXP_DIR:
+VALIDATION_EXP_DIR:
 HARDWARE_RESOURCES:
     Agilent_33250A:
         DRIVER_PATH: pyflux.hardware.drivers
@@ -15,9 +17,9 @@ HARDWARE_RESOURCES:
         ID: HEWLETT-PACKARD,E3631A,0,2.1-5.0-1.0
 DATA_COLLECTION: 
   N: 10000 # Number of datapoints collected at the DC offset
-  DC_OFFSETS: [0.050] # A (single offset per dataset)
+  DC_OFFSETS: [0.060] # A (single offset per dataset)
   F_MINS: [1.0e+6] # Hz
-  F_MAXS: [7.6e+6] # Hz Here are the max freqs used in order of DC offset [7.6e6, 9.2e6, 10.8e6, 13e6]
+  F_MAXS: [9.2e+6] # Hz Here are the max freqs used in order of DC offset [7.6e6, 9.2e6, 10.8e6, 13e6]
   OSC_SAMPLE_RATES: [500e6] # Hz
   SUBCARRIER_SPACING: 100e3 # Hz
   UPSAMPLE_FACTOR: 4
@@ -29,7 +31,7 @@ DATA_COLLECTION:
   POWER_MIN: 0.1  # minimum symbol power
   POWER_MAX: 1.5  # maximum symbol power
   JITTER_POWER: 0 # off-constellation complex noise on symbols (collection only); 0 disables
-  DATASET_PATH: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/sweeps/prime_coast_dc0.05A_fmin1e+06_fmax7.6e+06_20260724_2101.zarr
+  DATASET_PATH: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/sweeps/fair_ledge_dc0.06A_fmin1e+06_fmax9.2e+06_20260726_1115.zarr
   CLIP_THRESHOLD: 3.0 # clip the AWG output to +/-this value (V)
 
 CHANNEL_GRID_SEARCH:

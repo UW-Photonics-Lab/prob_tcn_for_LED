@@ -181,6 +181,8 @@ class TCNAdapter:
         if has_val:
             history["val_loss"] = []
         skipped_batches = 0
+        best_val_loss = float("inf")
+        best_state = None
         for _ in range(epochs):
             epoch_loss, n_batches = 0.0, 0
             for xb, yb in loader:
@@ -209,8 +211,19 @@ class TCNAdapter:
             if scheduler is not None:
                 scheduler.step(val_loss if has_val else train_loss)
 
+            # keep the best-monitored weights so save() writes the optimum rather
+            # than the final epoch
+            monitored_loss = val_loss if has_val else train_loss
+            if monitored_loss < best_val_loss:
+                best_val_loss = monitored_loss
+                best_state = {name: tensor.detach().cpu().clone()
+                              for name, tensor in self.model.state_dict().items()}
+
         if skipped_batches:
             print(f"    [fit] skipped {skipped_batches} non-finite batches (grad_clip={grad_clip})")
+
+        if best_state is not None:
+            self.model.load_state_dict(best_state)
         return history
 
     def predict(self, X):

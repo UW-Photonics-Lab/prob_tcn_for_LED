@@ -261,6 +261,15 @@ if __name__ == "__main__":
             noise_floor_points=int(getattr(Exp.config.ENCODER_DECODER_VALIDATION, "NOISE_FLOOR_POINTS", 0)),
             device=device, seed=seed, experiments_dir=EXP_DIR, experiment_name="ed_validation",
             run_prefix=RUN_NAME, debug=False)
+
+        validation_exp_dir_override = getattr(Exp.config, 'VALIDATION_EXP_DIR', None)
+        if validation_exp_dir_override:
+            validation.exp_dir = Path(validation_exp_dir_override)
+            validation.runs_dir = validation.exp_dir / "runs"
+            validation.summary_dir = validation.exp_dir / "summary"
+            validation.runs_jsonl = validation.exp_dir / "runs.jsonl"
+            Exp.log(f"resuming validation in {validation.exp_dir}")
+
         val_exp_dir = validation.run()
         check_channel.run("post-validation")
 
