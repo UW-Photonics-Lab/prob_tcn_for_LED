@@ -1,0 +1,33 @@
+RUNTIME:
+  DEVICE: cuda
+  SEED: 0
+
+HARDWARE_RESOURCES:
+    Agilent_33250A:
+        DRIVER_PATH: pyflux.hardware.drivers
+        ID: Agilent Technologies,33250A,0,1.03-1.01-1.00-03-1
+    Tektronix_TDS2000:
+        DRIVER_PATH: pyflux.hardware.drivers
+        ID: TEKTRONIX,TBS2074,C020561,CF:91.1CT FV:v1.26.0; FPGA:v1.21;
+    HP_EE3631A:
+        DRIVER_PATH: pyflux.hardware.drivers
+        ID: HEWLETT-PACKARD,E3631A,0,2.1-5.0-1.0
+
+RATE_ESTIMATE:
+  # One previous hardware validation per DC bias. Its lowest-EVM E/D is revalidated; the
+  # bias, band, CP and preamble are read from the dataset that E/D was trained on.
+  PREVIOUS_VALIDATION_DIRS:
+    - raw_storm_ed_validation_20260809_0426
+    - tame_flare_ed_validation_20260817_0004
+  CONSTELLATION: qpsk
+  VALIDATION_TRIALS: 40
+  NOISE_FLOOR_POINTS: 20 # replays of one fixed encoded symbol for the E/D noise floor
+  ONE_TAP_ESTIMATION_SYMBOLS: 20 # baseline one-tap channel estimate only, never scored
+  ONE_TAP_EVALUATION_SYMBOLS: 40 # baseline held-out symbols the rate is computed from
+  OSC_SAMPLE_RATE: 500e6 # Hz
+  SUBCARRIER_SPACING: 100e3 # Hz
+  UPSAMPLE_FACTOR: 4
+  AWG_TABLE_FRACTION: 0.125
+  CP_LENGTH_FRACTION: 0.25
+  OSC_SCALE: 0.5 # V/div
+  CLIP_THRESHOLD: 3.0 # V
