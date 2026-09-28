@@ -21,15 +21,15 @@ from pathlib import Path
 import numpy as np
 import yaml
 import zarr
-
+from plot_rate_estimate import summarize_rates
 from pyflux.core.block import Signal
 from pyflux.core.chain import Chain
 from pyflux.core.experiment import ExperimentalContext
-from modules.experimental_blocks import *
+
 from modules.constellation_diagram import get_constellation
+from modules.experimental_blocks import *
 from modules.grid_search import EncoderDecoderValidation
 from modules.grid_search.base import generate_run_name
-from plot_rate_estimate import summarize_rates
 
 HERE = Path(__file__).resolve().parent
 CONFIG_FILE = HERE / (sys.argv[1] if len(sys.argv) > 1 else "rate_estimate.yml")
