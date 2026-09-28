@@ -37,14 +37,14 @@ RUN_CONFIGS = [
         "ed_val_exp_dir":  "data/experiments/train_and_validate/nice_rain_ed_validation_20260917_1929",
         "dataset_path":    "data/sweeps/prime_coast_dc0.05A_fmin1e+06_fmax7.6e+06_20260724_2101.zarr",
     },
-    # {
-    #     "label": "60 mA",
-    #     "dc_ma": 60,
-    #     "channel_exp_dir": "data/experiments/train_and_validate/tiny_cliff_channel_models_20260810_1622",
-    #     "ed_exp_dir":      "data/experiments/train_and_validate/tiny_cliff_encoder_decoder_20260811_0335",
-    #     "ed_val_exp_dir":  "data/experiments/train_and_validate/tiny_cliff_ed_validation_20260811_0457",
-    #     "dataset_path":    "data/sweeps/fair_ledge_dc0.06A_fmin1e+06_fmax9.2e+06_20260726_1115.zarr",
-    # },
+    {
+        "label": "60 mA",
+        "dc_ma": 60,
+        "channel_exp_dir": "data/experiments/train_and_validate/tidy_vale_channel_models_20260921_1015",
+        "ed_exp_dir":      "data/experiments/train_and_validate/tidy_vale_encoder_decoder_20260921_2135",
+        "ed_val_exp_dir":  "data/experiments/train_and_validate/tidy_vale_ed_validation_20260923_1322",
+        "dataset_path":    "data/sweeps/fair_ledge_dc0.06A_fmin1e+06_fmax9.2e+06_20260726_1115.zarr",
+    },
     # {
     #     "label": "80 mA",
     #     "dc_ma": 80,
