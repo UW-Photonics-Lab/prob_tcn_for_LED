@@ -81,10 +81,10 @@ CHANNEL_GRID = {
         {
             "model": "tcn",
             "params": {
-                "nlayers":          2,
+                "nlayers":          3,
                 "dilation_base":    2,
-                "kernel_size":      4,
-                "hidden_channels":  8,
+                "kernel_size":      5,
+                "hidden_channels":  16,
                 "learn_noise":      True,
                 "gaussian":         True,
                 "epochs":           100,
@@ -116,8 +116,39 @@ ENCODER_DECODER_GRID = {
         #             "quantization":     None
         #     },
         # },
+        {
+            "model": "Qxx_tcn",
+            "params": {
+                    "nlayers":         2,
+                    "dilation_base":   2,
+                    "kernel_size":     3,
+                    "hidden_channels": 4,
+                    "epochs":          1000,
+                    "lr":              1e-3,
+                    "weight_decay":    1e-5,
+                    "batch_size":      8,
+                    "activation":       "relu",
+                    "quantization":     [{"frac_bits": 8, "data_width": 16}, {"frac_bits": 7, "data_width": 14}, {"frac_bits": 7, "data_width": 13}, {"frac_bits": 8, "data_width": 12}, {"frac_bits": 6, "data_width": 11}, {"frac_bits": 5, "data_width": 10}, {"frac_bits": 5, "data_width": 9}, {"frac_bits": 4, "data_width": 8}, {"frac_bits": 3, "data_width": 7}, {"frac_bits": 3, "data_width": 6}, {"frac_bits": 2, "data_width": 5}, {"frac_bits": 2, "data_width": 4}],
+            },
+        },
+        {
+            "model": "adder_tcn",
+            "params": {
+                    "nlayers":         2,
+                    "dilation_base":   2,
+                    "kernel_size":     3,
+                    "hidden_channels": 4,
+                    "epochs":          1000,
+                    "lr":              0.1, #cosine aneealing start if cosine anealing enabled
+                    "weight_decay":    1e-5,
+                    "batch_size":      8,
+                    "activation":       "relu",
+                    "quantization":     [{"frac_bits": 8, "data_width": 16}, {"frac_bits": 7, "data_width": 14}, {"frac_bits": 7, "data_width": 13}, {"frac_bits": 8, "data_width": 12}, {"frac_bits": 6, "data_width": 11}, {"frac_bits": 5, "data_width": 10}, {"frac_bits": 5, "data_width": 9}, {"frac_bits": 4, "data_width": 8}, {"frac_bits": 3, "data_width": 7}, {"frac_bits": 3, "data_width": 6}, {"frac_bits": 2, "data_width": 5}, {"frac_bits": 2, "data_width": 4}],
+                    "cosineAnnealing_min_lr": 1e-6,
+            },
+        },
         # {
-        #     "model": "Qxx_tcn",
+        #     "model": "shift_tcn",
         #     "params": {
         #             "nlayers":         3,
         #             "dilation_base":   2,
@@ -128,26 +159,9 @@ ENCODER_DECODER_GRID = {
         #             "weight_decay":    1e-5,
         #             "batch_size":      8,
         #             "activation":       "relu",
-        #             "quantization":     {"frac_bits": 8, "data_width": 16},
+        #             "quantization":     [{"N": 1, "B": 4, "data_width": 4}, {"N": 2, "B": 4, "data_width": 8}],
         #     },
         # },
-        {
-            "model": "adder_tcn",
-            "params": {
-                    "nlayers":         3,
-                    "dilation_base":   2,
-                    "kernel_size":     5,
-                    "hidden_channels": 8,
-                    "epochs":          1000,
-                    "lr":              0.1,
-                    "weight_decay":    1e-5,
-                    "batch_size":      8,
-                    "activation":       "relu",
-                    "quantization":     {"frac_bits": 16, "data_width": 32},
-                    "cosineAnnealing_min_lr": 1e-6,
-                    "W_init_normal": [True, False]
-            },
-        },
     ]
 }
 

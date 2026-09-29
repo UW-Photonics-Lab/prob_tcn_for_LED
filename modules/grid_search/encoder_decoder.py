@@ -21,7 +21,7 @@ from modules.experimental_blocks import band_limited_zc_preamble
 from modules.grid_search.adapters import MODEL_REGISTRY
 from modules.grid_search.base import GridSearchBase
 from modules.grid_search.grid import expand_grid, resolve_runtime
-from modules.models import TCN, QxxTCN, AdderTCN
+from modules.models import TCN, QxxTCN, AdderTCN#, ShiftTCN
 from modules.utils import (calculate_BER, calculate_per_burst_rrmse_pct_loss, evm_pct, in_band_time_loss,
                            load_ofdm_dataset, symbols_to_time)
 
@@ -31,6 +31,7 @@ ED_MODELS = {
     "tcn_ae": TCN,
     "Qxx_tcn": QxxTCN,
     "adder_tcn": AdderTCN,
+    #"shift_tcn": ShiftTCN,
 }
 
 
@@ -314,12 +315,14 @@ class EncoderDecoderGridSearch(GridSearchBase):
         metrics = self._evaluate(encoder, decoder, channel_model, ofdm_config, num_bits, batch_size)
         metrics["num_params"] = encoder.get_num_params() + decoder.get_num_params()
         metrics["channel_run_id"] = point["channel_run_id"]
+        metrics["name"] = point["model"]
         if self.mix:
             metrics["encoder"] = p
             metrics["decoder"] = point["decoder"]["params"]
 
         if point["model"] != "tcn_ae":
             metrics["bit_width"] = p.get("quantization").get("data_width")
+            metrics["energy"] = encoder.energy + decoder.energy
         # In the future, add: Power/Energy metric, RM/BOP/NABS (From adderCNN paper)
 
         # propagate channel model metadata
@@ -340,20 +343,27 @@ class EncoderDecoderGridSearch(GridSearchBase):
         self._plot_ber(run_dir, history["ber"])
         with torch.no_grad():
             sent_freq = self._frame_to_freq(eval_sent_time, ofdm_config)
-            decoded_time_eval = self._forward(encoder.eval(), decoder.eval(), channel_model, eval_sent_time)
+            encoded = encoder(eval_sent_time)
+            channel_out = channel_model(encoded)
             recv_freq = self._decode_freq(encoder.eval(), decoder.eval(), channel_model, eval_sent_time, ofdm_config)
             evm = evm_pct(sent_freq, recv_freq).item()
         ch_model_type = f"{ch_meta.get('model', 'channel').upper()} {ch_meta.get('distribution', 'none')}"
         self._plot_constellation(run_dir, sent_freq, recv_freq, ofdm_config.subcarrier_freqs_hz,
                                  channel_id=point["channel_run_id"], channel_type=ch_model_type, evm=evm)
         #self._plot_constellation(run_dir, sent_freq, self._frame_to_freq(encoder(eval_sent_time), ofdm_config=ofdm_config), ofdm_config.subcarrier_freqs_hz, rec_title="encoded")
-        sv = [sent_freq, self._frame_to_freq(encoder(eval_sent_time), ofdm_config=ofdm_config), self._frame_to_freq(decoded_time_eval, ofdm_config=ofdm_config),  recv_freq]
+        if isinstance(channel_out, tuple):
+            # probabilistic channel: scale the sampled noise realization around the mean
+            # so training noise can be annealed (noise_scale 1 = full noise, 0 = mean only)
+            noisy, mean = channel_out[0], channel_out[1]
+            received_symbol = mean + noise_scale * (noisy - mean)
+        sv = [sent_freq, self._frame_to_freq(encoded, ofdm_config=ofdm_config), self._frame_to_freq(received_symbol, ofdm_config=ofdm_config), recv_freq]
         self._plot_constellation_enhanced_for_sv(run_dir, sv=sv,py=sv, freqs=ofdm_config.subcarrier_freqs_hz, evm_py=evm)
         return metrics
 
     def run(self, **prepare_kwargs):
         super().run(**prepare_kwargs)
-        self._plot_evm_vs_bitwidth(self.summary_dir, show_best_line=True)
+        self._plot_evm_vs_bitwidth(self.summary_dir)
+        self._plot_evm_vs_energy(self.summary_dir)
         return self.exp_dir
 
     # ------------------------------------------------------------------- plots
@@ -481,31 +491,170 @@ class EncoderDecoderGridSearch(GridSearchBase):
         fig.savefig(run_dir / "plots" / f"constellation_{current_time}.png", dpi=120)
         return fig
 
+    # def _plot_evm_vs_bitwidth(self, run_dir, show_best_line=False):
+    #     data = self.all_metrics
+    #     bit_widths_all = [d.get("bit_width") for d in data if "bit_width" in d]
+    #     rrmse_all = [d.get("rrmse_pct") for d in data if "bit_width" in d]
+
+    #     if len(bit_widths_all) != len(rrmse_all):
+    #         raise ValueError("bit_width and rrmse_pct must be present for every point")
+    #     if len(bit_widths_all) == 0:
+    #         return
+
+    #     dot_color = "#2E86AB"
+    #     line_color = "#E4572E"
+
+    #     fig = Figure(figsize=(9, 6), dpi=150)
+    #     ax = fig.add_subplot(111)
+    #     ax.invert_xaxis()
+
+    #     # Scatter every point (duplicates per bit width included)
+    #     ax.scatter(bit_widths_all, rrmse_all, s=70, color=dot_color,
+    #             edgecolor="white", linewidth=1.0, zorder=3,
+    #             label="RRMSE (%)")
+
+    #     # Compute min rrmse per bit width, for optional line + annotations
+    #     best_by_bw = {}
+    #     for bw, r in zip(bit_widths_all, rrmse_all):
+    #         if bw not in best_by_bw or r < best_by_bw[bw]:
+    #             best_by_bw[bw] = r
+
+    #     sorted_bws = sorted(best_by_bw.keys(), reverse=True)
+    #     best_rrmse = [best_by_bw[bw] for bw in sorted_bws]
+
+    #     if show_best_line:
+    #         ax.plot(sorted_bws, best_rrmse, linestyle="--", linewidth=1.5,
+    #                 color=line_color, zorder=2, label="Best RRMSE per bit width")
+
+    #     # Annotate only the min-per-bitwidth points
+    #     for bw, r in zip(sorted_bws, best_rrmse):
+    #         ax.annotate(f"{r:.2f}%", (bw, r), textcoords="offset points",
+    #                     xytext=(0, 10), ha="center", fontsize=8.5, color=line_color)
+
+    #     ax.set_xlabel("Bit Width", fontsize=12, fontweight="bold")
+    #     ax.set_ylabel("RRMSE (%)", fontsize=12, fontweight="bold")
+    #     ax.set_title("RRMSE vs. Bit Width", fontsize=14, fontweight="bold", pad=15)
+
+    #     ax.set_xticks(sorted(set(bit_widths_all), reverse=True))
+    #     ax.margins(y=0.15)
+    #     ax.grid(True, alpha=0.3)
+    #     ax.legend(fontsize=10, frameon=True, framealpha=0.9, loc="upper right")
+    #     ax.tick_params(labelsize=10)
+
+    #     for spine in ("top", "right"):
+    #         ax.spines[spine].set_visible(False)
+
+    #     fig.tight_layout()
+
+    #     plots_dir = run_dir / "plots"
+    #     plots_dir.mkdir(parents=True, exist_ok=True)
+    #     out_path = plots_dir / "rrmse_vs_bitwidth.png"
+    #     fig.savefig(out_path, dpi=120)
+    #     #print(f"Saved plot to {out_path}")
+
+    #     return fig, ax
+    # def _plot_evm_vs_energy(self, run_dir, show_best_line=False):
+    #     data = self.all_metrics
+    #     energy_all = [d.get("energy") for d in data if "energy" in d]
+    #     rrmse_all = [d.get("rrmse_pct") for d in data if "energy" in d]
+
+    #     if len(energy_all) != len(rrmse_all):
+    #         raise ValueError("bit_width and energy must be present for every point")
+    #     if len(energy_all) == 0:
+    #         return
+
+    #     dot_color = "#2E86AB"
+    #     line_color = "#E4572E"
+
+    #     fig = Figure(figsize=(9, 6), dpi=150)
+    #     ax = fig.add_subplot(111)
+    #     ax.invert_xaxis()
+
+    #     # Scatter every point (duplicates per bit width included)
+    #     ax.scatter(energy_all, rrmse_all, s=70, color=dot_color,
+    #             marker="x", linewidth=1.0, zorder=3,
+    #             label="RRMSE (%)")
+
+    #     # Compute min rrmse per bit width, for optional line + annotations
+    #     best_by_bw = {}
+    #     for bw, r in zip(energy_all, rrmse_all):
+    #         if bw not in best_by_bw or r < best_by_bw[bw]:
+    #             best_by_bw[bw] = r
+
+    #     sorted_bws = sorted(best_by_bw.keys(), reverse=True)
+    #     best_rrmse = [best_by_bw[bw] for bw in sorted_bws]
+
+    #     if show_best_line:
+    #         ax.plot(sorted_bws, best_rrmse, linestyle="--", linewidth=1.5,
+    #                 color=line_color, zorder=2, label="Best RRMSE per energy")
+
+    #     # Annotate only the min-per-bitwidth points
+    #     for bw, r in zip(sorted_bws, best_rrmse):
+    #         ax.annotate(f"{r:.2f}%", (bw, r), textcoords="offset points",
+    #                     xytext=(0, 10), ha="center", fontsize=8.5, color=line_color)
+
+    #     ax.set_xlabel("Energy (J)", fontsize=12, fontweight="bold")
+    #     ax.set_ylabel("RRMSE (%)", fontsize=12, fontweight="bold")
+    #     ax.set_title("RRMSE vs. Energy (J)", fontsize=14, fontweight="bold", pad=15)
+
+    #     ax.set_xticks(sorted(set(energy_all), reverse=True))
+    #     ax.margins(y=0.15)
+    #     ax.grid(True, alpha=0.3)
+    #     ax.legend(fontsize=10, frameon=True, framealpha=0.9, loc="upper right")
+    #     ax.tick_params(labelsize=10)
+
+    #     for spine in ("top", "right"):
+    #         ax.spines[spine].set_visible(False)
+
+    #     fig.tight_layout()
+
+    #     plots_dir = run_dir / "plots"
+    #     plots_dir.mkdir(parents=True, exist_ok=True)
+    #     out_path = plots_dir / "rrmse_vs_energy.png"
+    #     fig.savefig(out_path, dpi=120)
+    #     #print(f"Saved plot to {out_path}")
+
+    #     return fig, ax
+    def _get_name_color_map(self, names):
+        unique_names = sorted(list(set(names)))
+        num_names = len(unique_names)
+        if num_names <= 10:
+            cmap = plt.get_cmap("tab10")
+            colors = [cmap(i) for i in range(num_names)]
+        else:
+            cmap = plt.get_cmap("gist_rainbow")
+            colors = [cmap(i / num_names) for i in range(num_names)]
+        return dict(zip(unique_names, colors))
+    
     def _plot_evm_vs_bitwidth(self, run_dir, show_best_line=False):
-        data = self.all_metrics
-        bit_widths_all = [d.get("bit_width") for d in data if "bit_width" in d]
-        rrmse_all = [d.get("rrmse_pct") for d in data if "bit_width" in d]
+        data = [d for d in self.all_metrics if "bit_width" in d and "rrmse_pct" in d]
+        if not data:
+            return None
 
-        if len(bit_widths_all) != len(rrmse_all):
-            raise ValueError("bit_width and rrmse_pct must be present for every point")
-        if len(bit_widths_all) == 0:
-            return
-
-        dot_color = "#2E86AB"
         line_color = "#E4572E"
+        names = [d.get("name", "Unknown") for d in data]
+        color_map = self._get_name_color_map(names)
 
         fig = Figure(figsize=(9, 6), dpi=150)
         ax = fig.add_subplot(111)
-        ax.invert_xaxis()
 
-        # Scatter every point (duplicates per bit width included)
-        ax.scatter(bit_widths_all, rrmse_all, s=70, color=dot_color,
-                edgecolor="white", linewidth=1.0, zorder=3,
-                label="RRMSE (%)")
+        # Plot each point grouped by metric 'name' to generate distinct colors & legend entries
+        plotted_names = set()
+        for d in data:
+            bw = d["bit_width"]
+            rrmse = d["rrmse_pct"]
+            name = d.get("name", "Unknown")
+            lbl = name if name not in plotted_names else None
+            plotted_names.add(name)
 
-        # Compute min rrmse per bit width, for optional line + annotations
+            ax.scatter(bw, rrmse, s=70, color=color_map[name],
+                       marker="x", linewidth=1.0, zorder=3, label=lbl)
+
+        # Compute min rrmse per bit width
         best_by_bw = {}
-        for bw, r in zip(bit_widths_all, rrmse_all):
+        for d in data:
+            bw = d["bit_width"]
+            r = d["rrmse_pct"]
             if bw not in best_by_bw or r < best_by_bw[bw]:
                 best_by_bw[bw] = r
 
@@ -516,7 +665,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
             ax.plot(sorted_bws, best_rrmse, linestyle="--", linewidth=1.5,
                     color=line_color, zorder=2, label="Best RRMSE per bit width")
 
-        # Annotate only the min-per-bitwidth points
+        # Annotate min-per-bitwidth points
         for bw, r in zip(sorted_bws, best_rrmse):
             ax.annotate(f"{r:.2f}%", (bw, r), textcoords="offset points",
                         xytext=(0, 10), ha="center", fontsize=8.5, color=line_color)
@@ -525,10 +674,12 @@ class EncoderDecoderGridSearch(GridSearchBase):
         ax.set_ylabel("RRMSE (%)", fontsize=12, fontweight="bold")
         ax.set_title("RRMSE vs. Bit Width", fontsize=14, fontweight="bold", pad=15)
 
-        ax.set_xticks(sorted(set(bit_widths_all), reverse=True))
+        all_bws = [d["bit_width"] for d in data]
+        ax.set_xticks(sorted(set(all_bws), reverse=True))
+        ax.invert_xaxis()
         ax.margins(y=0.15)
         ax.grid(True, alpha=0.3)
-        ax.legend(fontsize=10, frameon=True, framealpha=0.9, loc="upper right")
+        ax.legend(fontsize=9, frameon=True, framealpha=0.9, loc="upper right")
         ax.tick_params(labelsize=10)
 
         for spine in ("top", "right"):
@@ -540,6 +691,70 @@ class EncoderDecoderGridSearch(GridSearchBase):
         plots_dir.mkdir(parents=True, exist_ok=True)
         out_path = plots_dir / "rrmse_vs_bitwidth.png"
         fig.savefig(out_path, dpi=120)
-        #print(f"Saved plot to {out_path}")
+
+        return fig, ax
+
+    def _plot_evm_vs_energy(self, run_dir, show_best_line=False):
+        data = [d for d in self.all_metrics if "energy" in d and "rrmse_pct" in d]
+        if not data:
+            return None
+
+        line_color = "#E4572E"
+        names = [d.get("name", "Unknown") for d in data]
+        color_map = self._get_name_color_map(names)
+
+        fig = Figure(figsize=(9, 6), dpi=150)
+        ax = fig.add_subplot(111)
+
+        # Plot each point grouped by metric 'name'
+        plotted_names = set()
+        for d in data:
+            eng = d["energy"]
+            rrmse = d["rrmse_pct"]
+            name = d.get("name", "Unknown")
+            lbl = name if name not in plotted_names else None
+            plotted_names.add(name)
+
+            ax.scatter(eng, rrmse, s=70, color=color_map[name],
+                       marker="x", linewidth=1.5, zorder=3, label=lbl)
+
+        # Compute min rrmse per energy level
+        best_by_energy = {}
+        for d in data:
+            e = d["energy"]
+            r = d["rrmse_pct"]
+            if e not in best_by_energy or r < best_by_energy[e]:
+                best_by_energy[e] = r
+
+        sorted_energy = sorted(best_by_energy.keys())
+        best_rrmse = [best_by_energy[e] for e in sorted_energy]
+
+        if show_best_line:
+            ax.plot(sorted_energy, best_rrmse, linestyle="--", linewidth=1.5,
+                    color=line_color, zorder=2, label="Best RRMSE per energy")
+
+        # Annotate min-per-energy points
+        for e, r in zip(sorted_energy, best_rrmse):
+            ax.annotate(f"{r:.2f}%", (e, r), textcoords="offset points",
+                        xytext=(0, 10), ha="center", fontsize=8.5, color=line_color)
+
+        ax.set_xlabel("Energy (pJ per clk cycle)", fontsize=12, fontweight="bold")
+        ax.set_ylabel("RRMSE (%)", fontsize=12, fontweight="bold")
+        ax.set_title("RRMSE vs. Energy (pJ per clk cycle)", fontsize=14, fontweight="bold", pad=15)
+
+        ax.margins(y=0.15)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=9, frameon=True, framealpha=0.9, loc="upper right")
+        ax.tick_params(labelsize=10)
+
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+
+        fig.tight_layout()
+
+        plots_dir = run_dir / "plots"
+        plots_dir.mkdir(parents=True, exist_ok=True)
+        out_path = plots_dir / "rrmse_vs_energy.png"
+        fig.savefig(out_path, dpi=120)
 
         return fig, ax

@@ -13,7 +13,7 @@ import yaml
 import zarr
 import matplotlib.pyplot as plt
 from modules.utils import save_mem_file
-from modules.models import TCN
+from modules.models import TCN, QxxTCN
 from modules.grid_search import EncoderDecoderGridSearch
 from modules.grid_search.encoder_decoder import ARCH_KEYS
 from modules.grid_search.adapters import TCNAdapter
@@ -23,15 +23,15 @@ from experiments.test_real_gridsearch import (
 )
 FILES = ["input_time_series.mem", "encoder_output.mem", "recieved_time.mem", "decoder_output.mem"]
 
-sim_directory = "sv_tcn/tcn6"
+sim_directory = "sv_tcn/tcn7"
 DATA_WIDTH = 16
-TEST = 20
+TEST = 1
 SAVE_PATH = f"{sim_directory}"
-ED_MODEL = "data/experiments/test_real_gridsearch/encoder_decoder_20260911_0905/runs/tcn_ae_6f25ae0d"
-CHANNEL_PTH = "data/experiments/test_real_gridsearch/channel_models_20260911_0902/runs/tcn_b338d2dc"
-
+ED_MODEL = "data/experiments/test_real_gridsearch/encoder_decoder_20260925_1312/runs/Qxx_tcn_efd24442"
+CHANNEL_PTH = "data/experiments/test_real_gridsearch/channel_models_20260925_1310/runs/tcn_b338d2dc"
+TCN_NAME = QxxTCN
 DATA_PATH = "data/dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr/sent_burst"
-WAVEFORMS = 1
+WAVEFORMS = 4
 TYPE = "Synthetic"
 ed_gs = EncoderDecoderGridSearch(
             ENCODER_DECODER_GRID,
@@ -39,13 +39,14 @@ ed_gs = EncoderDecoderGridSearch(
             dataset_path="nothing",
 )
 
+
 def create_plots(data_width, sent_time, ShowTimeSeries=False, ed_model_pth=ED_MODEL, plot_title="Qx.x"):
     py_freq = []
     with open(os.path.join(base_pth, ed_model_pth, "config.yaml"), "r") as file:
         config = yaml.safe_load(file)
         p = config["params"]
-        arch = {k: p[k] for k in ARCH_KEYS}
-        encoder = TCN(**arch).to("cpu")
+
+        encoder = TCN_NAME(**p).to("cpu")
         checkpoint = torch.load(os.path.join(base_pth, ed_model_pth, "model.pt"), map_location="cpu", weights_only=True)
         encoder.load_state_dict(checkpoint["encoder"])
         encoder.eval()
@@ -62,7 +63,7 @@ def create_plots(data_width, sent_time, ShowTimeSeries=False, ed_model_pth=ED_MO
         recieved_time = send_through_channel(outp)
         py_freq.append(ed_gs._frame_to_freq(recieved_time, OFDM_CONFIG))
 
-        decoder = TCN(**arch).to("cpu")
+        decoder = TCN_NAME(**p).to("cpu")
         decoder.load_state_dict(checkpoint["decoder"])
         decoder.eval()
 
@@ -187,12 +188,36 @@ def read_model(read_pth, save_pth, datawidth):
 
     for type in ["encoder", "decoder"]:
         e_or_d = model[type]
+        keys = e_or_d.copy().keys()
+        #print(f"{type} keys: {keys}")
+
+        #pre processing step
+        bn_list = []
+        for key in keys:
+            if "bn" in key:
+                if key.endswith("num_batches_tracked"):
+                    e_or_d.pop(key)
+                else:
+                    bn_list.append(key)
+            if len(bn_list) == 4:
+                gamma, beta, mu, var = [e_or_d[s] for s in bn_list]
+                eps = 1e-05
+                bn_weight = gamma / torch.sqrt(var + eps)
+                bn_bias = beta - (bn_weight * mu)
+                e_or_d[bn_list[0]] = bn_weight
+                e_or_d[bn_list[1]] = bn_bias
+                e_or_d.pop(bn_list[2])
+                e_or_d.pop(bn_list[3])
+                bn_list = []
+
         keys = e_or_d.keys()
         #print(f"{type} keys: {keys}")
         for key in keys:
             #print(f"Keyname: {key}")
 
             tensor = e_or_d[key]
+            #print(tensor)
+
             for i, hidden_channel in enumerate(tensor):
                 #print(f"    Channel{i}:")
                 #print(hidden_channel)
