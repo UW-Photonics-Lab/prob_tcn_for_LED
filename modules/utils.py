@@ -12,6 +12,7 @@ import sys
 import time
 import json
 from modules.models import TCN_channel, TCN
+import math
 
 @dataclass
 class OFDMConfig:
@@ -167,3 +168,38 @@ def evm_pct(reference, measured):
     signal_power = (abs(reference) ** 2).mean()
     residual_power = (abs(reference - measured) ** 2).mean()
     return (residual_power / (signal_power + 1e-12)) ** 0.5 * 100
+
+def float_to_q88_int(x: float, data_width) -> int:
+    """Convert float → 16-bit Q8.8 signed integer."""
+    scale_factor = data_width // 2
+    maximum = pow(2, data_width-1) - 1
+    minimum = -1 * pow(2, data_width-1)
+    scaled = int(round(x * pow(2, scale_factor)))
+    return max(minimum, min(maximum, scaled))
+
+def q88_int_to_hex(v: int, data_width) -> str:
+    """Format a signed Q8.8 integer as 4-digit hex (two's complement), variable for other notations"""
+    mask = (1 << data_width) - 1
+    hex_digits = math.ceil(data_width / 4)
+    return f"{v & mask:0{hex_digits}x}"
+
+def q88_hex_to_float(hexa: str, data_width):
+    sign_bit = 1 << (data_width - 1)
+    v = int(hexa, 16)
+    if v & sign_bit:  # If the sign bit is set (negative)
+        v -= 1 << data_width
+    return v / pow(2, data_width // 2)
+
+def save_mem_file(path: str, values: list, comment: str = "", printDebug=True):
+    folder = os.path.dirname(path)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+
+    with open(path, "w") as f:
+        if comment:
+            f.write(f"// {comment}\n")
+        for v in values:
+            f.write(v + "\n")
+
+    if printDebug:
+        print(f"  Saved {len(values)} values → {path}")
