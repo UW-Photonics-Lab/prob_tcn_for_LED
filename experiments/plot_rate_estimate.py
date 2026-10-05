@@ -27,9 +27,11 @@ Outputs:
                           percentage of the noise-floor ceiling
     evm_vs_frequency.png/.svg
 
-    python plot_rate_estimate.py <rate_estimate experiment dir>
+    python plot_rate_estimate.py <rate_estimate experiment dir> [--font-size N]
+
+--font-size sets the axis label size; titles, ticks and legend scale from it.
 '''
-import sys
+import argparse
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -37,6 +39,10 @@ import numpy as np
 import pandas as pd
 import yaml
 import zarr
+
+from modules.figure_fonts import FigureFonts
+
+DEFAULT_FONTS = FigureFonts.from_base(12)
 
 CASE_STYLES = {
     "one_tap_baseline": {"label": "One-tap equalization", "color": "#009E73", "marker": "s", "linestyle": "-"},
@@ -118,7 +124,7 @@ def compare_rates(summary):
     return pd.DataFrame.from_records(rows)
 
 
-def summarize_rates(experiment_dir):
+def summarize_rates(experiment_dir: Path | str, fonts: FigureFonts = DEFAULT_FONTS) -> tuple[pd.DataFrame, pd.DataFrame]:
     experiment_dir = Path(experiment_dir)
     manifest = yaml.safe_load((experiment_dir / "rate_estimate.yaml").read_text())
     subcarrier_spacing_hz = float(manifest["subcarrier_spacing_hz"])
@@ -159,15 +165,19 @@ def summarize_rates(experiment_dir):
             ax.plot(frequencies_mhz, evm_pct, color=style["color"], marker=style["marker"],
                     linestyle=style["linestyle"], markersize=2.5, linewidth=1.0, label=style["label"])
 
-        ax.set_title(f"{bias['dc_ma']} mA")
-        ax.set_xlabel("Frequency (MHz)")
-        ax.set_ylabel("EVM (%)")
+        ax.set_title(f"{bias['dc_ma']} mA", fontsize=fonts.title)
+        ax.set_xlabel("Frequency (MHz)", fontsize=fonts.label)
+        ax.set_ylabel("EVM (%)", fontsize=fonts.label)
+        ax.tick_params(labelsize=fonts.tick)
         ax.set_ylim(bottom=0)
         ax.grid(True, alpha=0.3)
 
-    axes[0][0].legend(fontsize=7, frameon=False)
-    fig.suptitle("Per-Carrier EVM%: One-Tap Baseline, E/D Residual and E/D Noise Floor")
-    fig.tight_layout()
+    fig.suptitle("Per-Carrier EVM%: One-Tap Baseline, E/D Residual and E/D Noise Floor", fontsize=fonts.suptitle)
+    fig.tight_layout(w_pad=2.0)
+    # Below the panels so it cannot cover the curves at any font size
+    legend_handles, legend_labels = axes[0][0].get_legend_handles_labels()
+    fig.legend(legend_handles, legend_labels, loc="upper center", bbox_to_anchor=(0.5, 0.0),
+               ncol=len(legend_labels), fontsize=fonts.legend, frameon=False)
     fig.savefig(experiment_dir / "evm_vs_frequency.png", dpi=300, bbox_inches="tight")
     fig.savefig(experiment_dir / "evm_vs_frequency.svg", format="svg", bbox_inches="tight")
     plt.close(fig)
@@ -184,4 +194,8 @@ def summarize_rates(experiment_dir):
 
 
 if __name__ == "__main__":
-    summarize_rates(sys.argv[1])
+    parser = argparse.ArgumentParser(description="Rate tables and the EVM vs frequency figure for a rate_estimate experiment")
+    parser.add_argument("experiment_dir", type=Path)
+    parser.add_argument("--font-size", type=float, default=10.0, help="axis label size in points; other text scales from it")
+    arguments = parser.parse_args()
+    summarize_rates(arguments.experiment_dir, FigureFonts.from_base(arguments.font_size))

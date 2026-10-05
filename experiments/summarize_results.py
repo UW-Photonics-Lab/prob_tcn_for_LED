@@ -35,22 +35,22 @@ RUN_CONFIGS = [
         "ed_val_exp_dir":  "data/experiments/train_and_validate/raw_storm_ed_validation_20260809_0426",
         "dataset_path":    "data/sweeps/prime_coast_dc0.05A_fmin1e+06_fmax7.6e+06_20260724_2101.zarr",
     },
-    {
-        "label": "60 mA",
-        "dc_ma": 60,
-        "channel_exp_dir": "data/experiments/train_and_validate/tiny_cliff_channel_models_20260810_1622",
-        "ed_exp_dir":      "data/experiments/train_and_validate/tiny_cliff_encoder_decoder_20260811_0335",
-        "ed_val_exp_dir":  "data/experiments/train_and_validate/tiny_cliff_ed_validation_20260811_0457",
-        "dataset_path":    "data/sweeps/fair_ledge_dc0.06A_fmin1e+06_fmax9.2e+06_20260726_1115.zarr",
-    },
-    {
-        "label": "80 mA",
-        "dc_ma": 80,
-        "channel_exp_dir": "data/experiments/train_and_validate/fleet_sand_channel_models_20260812_1903",
-        "ed_exp_dir":      "data/experiments/train_and_validate/calm_coast_encoder_decoder_20260815_1103",
-        "ed_val_exp_dir":  "data/experiments/train_and_validate/calm_coast_ed_validation_20260815_1237",
-        "dataset_path":    "data/sweeps/calm_heath_dc0.08A_fmin1e+06_fmax1.08e+07_20260729_1339.zarr",
-    },
+    # {
+    #     "label": "60 mA",
+    #     "dc_ma": 60,
+    #     "channel_exp_dir": "data/experiments/train_and_validate/tiny_cliff_channel_models_20260810_1622",
+    #     "ed_exp_dir":      "data/experiments/train_and_validate/tiny_cliff_encoder_decoder_20260811_0335",
+    #     "ed_val_exp_dir":  "data/experiments/train_and_validate/tiny_cliff_ed_validation_20260811_0457",
+    #     "dataset_path":    "data/sweeps/fair_ledge_dc0.06A_fmin1e+06_fmax9.2e+06_20260726_1115.zarr",
+    # },
+    # {
+    #     "label": "80 mA",
+    #     "dc_ma": 80,
+    #     "channel_exp_dir": "data/experiments/train_and_validate/fleet_sand_channel_models_20260812_1903",
+    #     "ed_exp_dir":      "data/experiments/train_and_validate/calm_coast_encoder_decoder_20260815_1103",
+    #     "ed_val_exp_dir":  "data/experiments/train_and_validate/calm_coast_ed_validation_20260815_1237",
+    #     "dataset_path":    "data/sweeps/calm_heath_dc0.08A_fmin1e+06_fmax1.08e+07_20260729_1339.zarr",
+    # },
     {
         "label": "120 mA",
         "dc_ma": 120,
@@ -67,6 +67,9 @@ N_POWER_BINS    = 10       # bins for plot 1
 MAX_QQ_SAMPLES  = 10_000  # downsample for Q-Q speed
 SHOW_RUN_IN_TITLE = False 
 PARETO_TITLE = "Median Pareto Front for 10 E/Ds per Channel Model"
+# Channel-model families in the Pareto EVM plot, by model name ("tcn", "lru", "gmp",
+# "lstm", "tthnet"). "tcn" covers the deterministic and probabilistic TCNs. None plots all
+PARETO_MODELS_TO_PLOT: set[str] | None = {"tcn"}
 PRED_VS_ACTUAL_TITLE = "Predicted vs. Actual EVM% across Pareto Sweep Runs"
 PACKET_TITLE = "Predicted Response of Best Gaussian TCN Channel Model"
 VAL_RRMSE_TITLE = "Validation RRMSE% vs. Sent Power"
@@ -74,8 +77,8 @@ VAL_RRMSE_VS_PARAMS_TITLE = "Channel Model Validation RRMSE% vs. Parameter Count
 NOISE_FLOOR_TITLE = "Best E/D End-to-End Residual EVM% vs. Estimated Noise Floor"
 
 # Style
-_FONT = 7
-_SMALL = 5
+_FONT = 12
+_SMALL = 9
 _mm = 1 / 25.4
 _fw  = 88  * _mm   # single-column width
 _fh  = 88  * _mm
@@ -454,6 +457,8 @@ def plot_pareto_evm(run_configs: list[dict]) -> None:
         for channel_run_id, seed_evms in seeds_per_channel.items():
             channel_run = channel_by_run_id.get(channel_run_id)
             if channel_run is None:
+                continue
+            if PARETO_MODELS_TO_PLOT is not None and channel_run.get("model") not in PARETO_MODELS_TO_PLOT:
                 continue
             key = (channel_run.get("model", "unknown"), channel_run.get("distribution") or "none")
             traces.setdefault(key, []).append({

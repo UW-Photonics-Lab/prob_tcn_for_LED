@@ -22,6 +22,11 @@ from pyflux.core.chain import Chain
 from modules.experimental_blocks import ApplyEncoder, ApplyDecoder
 from modules.grid_search.base import GridSearchBase
 from modules.grid_search.encoder_decoder import ARCH_KEYS
+from modules.equalization_comparison import (
+    DEFAULT_FONTS as EQUALIZATION_COMPARISON_FONTS,
+    plot_equalization_comparison,
+    save_equalization_constellations,
+)
 from modules.models import TCN
 from modules.utils import calculate_BER, evm_pct
 
@@ -305,66 +310,19 @@ class EncoderDecoderValidation(GridSearchBase):
         payload = np.asarray(time_symbol_with_cp)[demod.cyclic_prefix_length:]
         return np.fft.fft(payload, norm="ortho")[demod.subcarrier_indicies]
 
-    def _plot_equalization_comparison(self, run_dir, channel_form, ed_stages,
-                                      no_ed_sent, no_ed_received, freqs):
-        '''Two-row constellation figure contrasting the E/D chain against raw OFDM with no
-        ML in the loop. Columns are the constellation as it moves Sent -> Encoded ->
-        Received -> Decoded; each panel is normalized to unit average power so the shape
-        is visible, and the final column overlays the ideal reference and its EVM.'''
-        stage_names = ["Sent", "Encoded", "Received", "Decoded"]
-        # without an E/D, encoding is the identity and there is no decoder, so the encoded
-        # panel repeats Sent and the decoded panel repeats the raw Received
-        no_ed_stages = {"Sent": no_ed_sent, "Encoded": no_ed_sent,
-                        "Received": no_ed_received, "Decoded": no_ed_received}
-        rows = [
-            ("With Encoder/Decoder", ed_stages, ed_stages["Sent"], ed_stages["Decoded"]),
-            ("Without Encoder/Decoder", no_ed_stages, no_ed_sent, no_ed_received),
-        ]
-
-        def unit_power(symbol_list):
-            symbols = np.concatenate([np.asarray(s) for s in symbol_list])
-            return symbols / (np.sqrt(np.mean(np.abs(symbols) ** 2)) + 1e-12)
-
-        def evm_percent(sent_list, recovered_list):
-            sent = np.concatenate([np.asarray(s) for s in sent_list])
-            recovered = np.concatenate([np.asarray(r) for r in recovered_list])
-            return float(evm_pct(sent, recovered))
-
-        fig = Figure(figsize=(14, 7.5))
-        axes = fig.subplots(2, 4)
-        for row_index, (row_label, stages, sent_list, final_list) in enumerate(rows):
-            row_evm = evm_percent(sent_list, final_list)
-            reference = unit_power(sent_list)
-            color = np.tile(np.asarray(freqs), len(sent_list))
-
-            for col_index, stage_name in enumerate(stage_names):
-                ax = axes[row_index][col_index]
-                symbols = unit_power(stages[stage_name])
-                scatter = ax.scatter(symbols.real, symbols.imag, s=8, c=color, cmap="viridis")
-
-                if stage_name == "Decoded":
-                    ax.scatter(reference.real, reference.imag, s=45, marker="x", c="red",
-                               linewidth=1.3, zorder=5)
-                    ax.text(0.04, 0.96, f"received EVM = {row_evm:.1f}%", transform=ax.transAxes,
-                            ha="left", va="top", fontsize=10, weight="bold",
-                            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8, edgecolor="none"))
-
-                if row_index == 0:
-                    ax.set_title(stage_name, fontsize=11)
-                ax.set_ylabel(f"{row_label}\n\nQuadrature" if col_index == 0 else "Quadrature",
-                              fontsize=9 if col_index == 0 else 8)
-                ax.set_xlabel("In-Phase", fontsize=8)
-                ax.grid(True, alpha=0.3)
-                ax.set_aspect("equal", "box")
-
-        fig.colorbar(scatter, ax=axes.ravel().tolist(), label="Carrier Frequency (Hz)",
-                     fraction=0.02, pad=0.02)
-        fig.suptitle("Comparison of Encoder Decoder Equalization to No Equalization "
-                     f"(Trained on {channel_form} Channel Model)", fontsize=13)
-        fig.text(0.5, 0.01, "Each panel normalized to unit average power. "
-                 "Red x marks the ideal reference constellation.", ha="center", fontsize=9)
-        (run_dir / "plots").mkdir(parents=True, exist_ok=True)
-        fig.savefig(run_dir / "plots" / "equalization_comparison.png", dpi=130, bbox_inches="tight")
+    def _plot_equalization_comparison(self, run_dir: Path, channel_form: str, ed_stages: dict[str, list[np.ndarray]],
+                                      no_ed_sent: list[np.ndarray], no_ed_received: list[np.ndarray],
+                                      freqs: np.ndarray) -> None:
+        '''Saves the constellations to plots/equalization_constellations.npz and draws the
+        figure from that file, so it can be restyled later with
+        experiments/plot_equalization_comparison.py instead of rerunning the hardware.'''
+        plots_dir = run_dir / "plots"
+        plots_dir.mkdir(parents=True, exist_ok=True)
+        constellation_path = plots_dir / "equalization_constellations.npz"
+        save_equalization_constellations(constellation_path, channel_form, ed_stages,
+                                         no_ed_sent, no_ed_received, freqs)
+        plot_equalization_comparison(constellation_path, plots_dir / "equalization_comparison",
+                                     EQUALIZATION_COMPARISON_FONTS)
 
     # ------------------------------------------------------------- artifacts
     def _store_waveforms(self, model_id, sent, received, channel_form, frac_delays=None,
