@@ -45,14 +45,14 @@ RUN_CONFIGS = [
         "ed_val_exp_dir":  "data/experiments/train_and_validate/tidy_vale_ed_validation_20260923_1322",
         "dataset_path":    "data/sweeps/fair_ledge_dc0.06A_fmin1e+06_fmax9.2e+06_20260726_1115.zarr",
     },
-    # {
-    #     "label": "80 mA",
-    #     "dc_ma": 80,
-    #     "channel_exp_dir": "data/experiments/train_and_validate/fleet_sand_channel_models_20260812_1903",
-    #     "ed_exp_dir":      "data/experiments/train_and_validate/calm_coast_encoder_decoder_20260815_1103",
-    #     "ed_val_exp_dir":  "data/experiments/train_and_validate/calm_coast_ed_validation_20260815_1237",
-    #     "dataset_path":    "data/sweeps/calm_heath_dc0.08A_fmin1e+06_fmax1.08e+07_20260729_1339.zarr",
-    # },
+    {
+        "label": "80 mA",
+        "dc_ma": 80,
+        "channel_exp_dir": "data/experiments/train_and_validate/rough_peak_channel_models_20260928_1103",
+        "ed_exp_dir":      "data/experiments/train_and_validate/rough_peak_encoder_decoder_20260928_2300",
+        "ed_val_exp_dir":  "data/experiments/train_and_validate/rough_peak_ed_validation_20260930_1701",
+        "dataset_path":    "data/sweeps/calm_heath_dc0.08A_fmin1e+06_fmax1.08e+07_20260729_1339.zarr",
+    },
     # {
     #     "label": "120 mA",
     #     "dc_ma": 120,

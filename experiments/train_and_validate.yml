@@ -17,9 +17,9 @@ HARDWARE_RESOURCES:
         ID: HEWLETT-PACKARD,E3631A,0,2.1-5.0-1.0
 DATA_COLLECTION: 
   N: 10000 # Number of datapoints collected at the DC offset
-  DC_OFFSETS: [0.080] # A (single offset per dataset)
+  DC_OFFSETS: [0.120] # A (single offset per dataset)
   F_MINS: [1.0e+6] # Hz
-  F_MAXS: [10.8e+6] # Hz Here are the max freqs used in order of DC offset [7.6e6, 9.2e6, 10.8e6, 13e6]
+  F_MAXS: [13e+6] # Hz Here are the max freqs used in order of DC offset [7.6e6, 9.2e6, 10.8e6, 13e6]
   OSC_SAMPLE_RATES: [500e6] # Hz
   SUBCARRIER_SPACING: 100e3 # Hz
   UPSAMPLE_FACTOR: 4
@@ -31,7 +31,7 @@ DATA_COLLECTION:
   POWER_MIN: 0.1  # minimum symbol power
   POWER_MAX: 1.5  # maximum symbol power
   JITTER_POWER: 0 # off-constellation complex noise on symbols (collection only); 0 disables
-  DATASET_PATH: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/sweeps/calm_heath_dc0.08A_fmin1e+06_fmax1.08e+07_20260729_1339.zarr
+  DATASET_PATH: /home/photonicslab/Desktop/microled_project/prob_tcn_for_LED/data/sweeps/mild_star_dc0.12A_fmin1e+06_fmax1.3e+07_20260802_2119.zarr
   CLIP_THRESHOLD: 3.0 # clip the AWG output to +/-this value (V)
 
 CHANNEL_GRID_SEARCH:
@@ -183,14 +183,14 @@ ENCODER_DECODER:
     hidden_channels: [16]
     activation: [relu]
     epochs: 1500
-    noise_anneal_start: [0.25]   # fraction of epochs at full channel noise before a linear
+    noise_anneal_start: [0.5]   # fraction of epochs at full channel noise before a linear
     lr: 1.0e-3
     weight_decay: [1e-5]  # AdamW L2 regularization; 0 disables.
     batch_size: 64
     factor: 0.5 # Learning rate scheduler
     patience: 25
     min_lr: 1.0e-6
-    drive_mean_power_weight: [1.0e-3]
+    drive_mean_power_weight: [1.0e-5]
     kurtosis_weight: [1.0e-1]     # stiffness of the pull toward kurtosis_target, not a force.
     kurtosis_target: [3.0]
 
