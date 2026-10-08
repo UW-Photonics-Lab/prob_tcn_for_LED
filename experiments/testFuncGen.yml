@@ -1,0 +1,4 @@
+HARDWARE_RESOURCES:
+    Agilent_33250A: 
+        DRIVER_PATH: pyflux.hardware.drivers
+        ID: Agilent Technologies,33250A,0,1.03-1.01-1.00-03-1

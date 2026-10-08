@@ -8,23 +8,31 @@ run_id encodes both the architecture params and the channel model's run_id.
 '''
 import random
 from pathlib import Path
-
+from datetime import datetime
 import numpy as np
 import torch
 import torch.optim as optim
 import yaml
 from matplotlib.figure import Figure
+import matplotlib.pyplot as plt
 
 from modules.constellation_diagram import get_constellation
 from modules.experimental_blocks import band_limited_zc_preamble
 from modules.grid_search.adapters import MODEL_REGISTRY
 from modules.grid_search.base import GridSearchBase
 from modules.grid_search.grid import expand_grid, resolve_runtime
-from modules.models import TCN
-from modules.utils import (calculate_BER, evm_pct, in_band_time_loss,
+from modules.models import TCN, QxxTCN, AdderTCN#, ShiftTCN
+from modules.utils import (calculate_BER, calculate_per_burst_rrmse_pct_loss, evm_pct, in_band_time_loss,
                            load_ofdm_dataset, symbols_to_time)
 
 ARCH_KEYS = ("nlayers", "dilation_base", "kernel_size", "hidden_channels", "activation")
+
+ED_MODELS = {
+    "tcn_ae": TCN,
+    "Qxx_tcn": QxxTCN,
+    "adder_tcn": AdderTCN,
+    #"shift_tcn": ShiftTCN,
+}
 
 
 class EncoderDecoderGridSearch(GridSearchBase):
@@ -48,13 +56,11 @@ class EncoderDecoderGridSearch(GridSearchBase):
         self.preamble_amplitude = float(grid_config["preamble_amplitude"])
         self.clip_threshold = float(clip_threshold)
         self.preamble_length = preamble_length
+        self.mix = grid_config["Mix-Match_Archs"]
 
-        ed_points = expand_grid([{"model": "tcn_ae", "params": grid_config["params"]}])
-        runs_per_arch = int(grid_config.get("runs_per_arch", 1))
-        if runs_per_arch > 1 and not any("seed" in point["params"] for point in ed_points):
-            ed_points = [{**point, "params": {**point["params"], "seed": seed}}
-                         for point in ed_points for seed in range(runs_per_arch)]
-        points = [{**p, "channel_run_id": run_id} for p in ed_points for run_id in self.channel_models]
+        ed_points = expand_grid(grid_config["models"])
+        points = [{**p, "channel_run_id": run_id} for p in ed_points for run_id in self.channel_models] if not self.mix else [{**p, "decoder": {**d},  "channel_run_id": run_id} for p in ed_points for d in ed_points for run_id in self.channel_models]
+
         shared_params = {k: v for k, v in grid_config.items() if k != "params"}
         super().__init__(points, grid_config, shared_params, experiments_dir, device, seed,
                           experiment_name, run_prefix=run_prefix, extra_manifest={
@@ -113,13 +119,19 @@ class EncoderDecoderGridSearch(GridSearchBase):
             loaded[run_id] = model
         return ofdm_config, loaded
 
-    def _sample_batch(self, batch_size, num_bits, ofdm_config):
+    def _sample_batch(self, batch_size, num_bits, ofdm_config, preamble_dne=None):
         true_bits = np.random.randint(0, 2, size=(batch_size, num_bits))
         symbols = [self.constellation.bits_to_symbols("".join(map(str, bits))) for bits in true_bits]
         true_frame = torch.tensor(np.stack(symbols), dtype=torch.complex64, device=self.device)
         sent_time = symbols_to_time(true_frame, ofdm_config.num_leading_zeros, ofdm_config.num_trailing_zeros,
                                     negative_rail=-self.clip_threshold, positive_rail=self.clip_threshold)
         sent_time = torch.hstack((sent_time[:, -ofdm_config.cyclic_prefix_length:], sent_time))
+        if preamble_dne:
+            fs = ofdm_config.baseband_fft_length * ofdm_config.subcarrier_spacing
+            freqs = ofdm_config.subcarrier_freqs_hz
+            preamble = band_limited_zc_preamble(self.preamble_length, fs,
+                                                float(freqs.min()), float(freqs.max()), self.preamble_amplitude)
+            self.preamble = torch.tensor(preamble, dtype=torch.float32, device=self.device).unsqueeze(0)
         sent_time = torch.hstack((self.preamble.expand(batch_size, -1), sent_time))  # [preamble | CP | symbol]
         return torch.tensor(true_bits, device=self.device), sent_time
 
@@ -183,7 +195,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
         if was_training:
             encoder.train(); decoder.train()
         ber = calculate_BER(recv_freq.flatten(), true_bits.flatten(), constellation=self.constellation)
-        return {"ber": ber, "evm_pct": evm_pct(sent_freq, recv_freq).item()}
+        return {"ber": ber, "rrmse_pct": calculate_per_burst_rrmse_pct_loss(sent_freq, recv_freq)}
 
     def _run_point(self, point, run_dir, context) -> dict:
         ofdm_config, channel_models = context
@@ -198,9 +210,9 @@ class EncoderDecoderGridSearch(GridSearchBase):
             np.random.seed(seed)
             torch.manual_seed(seed)
 
-        arch = {k: p[k] for k in ARCH_KEYS}
-        encoder = TCN(**arch).to(self.device)
-        decoder = TCN(**arch).to(self.device)
+        #arch = {k: p[k] for k in ARCH_KEYS}
+        encoder = ED_MODELS[point["model"]](**p).to(self.device)
+        decoder = ED_MODELS[point["model"]](**p).to(self.device) if not self.mix else ED_MODELS[point["model"]](**point["decoder"]["params"]).to(self.device)
         optimizer = optim.AdamW(list(encoder.parameters()) + list(decoder.parameters()),
                                  lr=float(p["lr"]),
                                  weight_decay=float(p.get("weight_decay", 0.0)))
@@ -212,6 +224,12 @@ class EncoderDecoderGridSearch(GridSearchBase):
                 factor=float(p.get("factor", 0.5)),
                 patience=int(p["patience"]),
                 min_lr=float(p.get("min_lr", 1e-6)),
+            )
+        elif "cosineAnnealing_min_lr" in p:
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=int(p["epochs"]),
+                eta_min=float(p.get("cosineAnnealing_min_lr", 1e-6)),
             )
 
         num_bits = len(ofdm_config.active_carrier_indices) * self.constellation.bits_per_symbol
@@ -280,7 +298,10 @@ class EncoderDecoderGridSearch(GridSearchBase):
             loss.backward()
             optimizer.step()
             if scheduler is not None and (not annealing_active or epoch >= anneal_start_epoch):
-                scheduler.step(loss.item())
+                if isinstance(scheduler, optim.lr_scheduler.CosineAnnealingLR):
+                    scheduler.step()
+                else:
+                    scheduler.step(loss.item())
             history["loss"].append(loss.item())
             history["ber"].append(self._test_ber(encoder, decoder, channel_model, ofdm_config, eval_bits, eval_sent_time))
             history["lr"].append(optimizer.param_groups[0]["lr"])
@@ -294,6 +315,15 @@ class EncoderDecoderGridSearch(GridSearchBase):
         metrics = self._evaluate(encoder, decoder, channel_model, ofdm_config, num_bits, batch_size)
         metrics["num_params"] = encoder.get_num_params() + decoder.get_num_params()
         metrics["channel_run_id"] = point["channel_run_id"]
+        metrics["name"] = point["model"]
+        if self.mix:
+            metrics["encoder"] = p
+            metrics["decoder"] = point["decoder"]["params"]
+
+        if point["model"] != "tcn_ae":
+            metrics["bit_width"] = p.get("quantization").get("data_width")
+            metrics["energy"] = encoder.energy + decoder.energy
+        # In the future, add: Power/Energy metric, RM/BOP/NABS (From adderCNN paper)
 
         # propagate channel model metadata
         ch_meta = self.channel_models[point["channel_run_id"]]
@@ -313,12 +343,28 @@ class EncoderDecoderGridSearch(GridSearchBase):
         self._plot_ber(run_dir, history["ber"])
         with torch.no_grad():
             sent_freq = self._frame_to_freq(eval_sent_time, ofdm_config)
+            encoded = encoder(eval_sent_time)
+            channel_out = channel_model(encoded)
             recv_freq = self._decode_freq(encoder.eval(), decoder.eval(), channel_model, eval_sent_time, ofdm_config)
             evm = evm_pct(sent_freq, recv_freq).item()
         ch_model_type = f"{ch_meta.get('model', 'channel').upper()} {ch_meta.get('distribution', 'none')}"
         self._plot_constellation(run_dir, sent_freq, recv_freq, ofdm_config.subcarrier_freqs_hz,
                                  channel_id=point["channel_run_id"], channel_type=ch_model_type, evm=evm)
+        #self._plot_constellation(run_dir, sent_freq, self._frame_to_freq(encoder(eval_sent_time), ofdm_config=ofdm_config), ofdm_config.subcarrier_freqs_hz, rec_title="encoded")
+        if isinstance(channel_out, tuple):
+            # probabilistic channel: scale the sampled noise realization around the mean
+            # so training noise can be annealed (noise_scale 1 = full noise, 0 = mean only)
+            noisy, mean = channel_out[0], channel_out[1]
+            received_symbol = mean + noise_scale * (noisy - mean)
+        sv = [sent_freq, self._frame_to_freq(encoded, ofdm_config=ofdm_config), self._frame_to_freq(received_symbol, ofdm_config=ofdm_config), recv_freq]
+        self._plot_constellation_enhanced_for_sv(run_dir, sv=sv,py=sv, freqs=ofdm_config.subcarrier_freqs_hz, evm_py=evm)
         return metrics
+
+    def run(self, **prepare_kwargs):
+        super().run(**prepare_kwargs)
+        self._plot_evm_vs_bitwidth(self.summary_dir)
+        self._plot_evm_vs_energy(self.summary_dir)
+        return self.exp_dir
 
     # ------------------------------------------------------------------- plots
     def _plot_ber(self, run_dir, ber_curve):
@@ -334,7 +380,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
         (run_dir / "plots").mkdir(parents=True, exist_ok=True)
         fig.savefig(run_dir / "plots" / "ber.png", dpi=120)
 
-    def _plot_constellation(self, run_dir, sent, received, freqs, channel_id=None, channel_type=None, evm=None):
+    def _plot_constellation(self, run_dir, sent, received, freqs, channel_id=None, channel_type=None, evm=None, sent_title="Sent", rec_title="Recieved"):
         '''Sent vs received QPSK symbols on the active carriers, coloured by
         carrier frequency. Received plot overlays sent symbols as red X markers for reference.'''
         sent_np = sent.detach().cpu().numpy()
@@ -347,12 +393,12 @@ class EncoderDecoderGridSearch(GridSearchBase):
         fig = Figure(figsize=(11, 5))
         ax_sent, ax_recv = fig.subplots(1, 2)
         ax_sent.scatter(sent_np_flat.real, sent_np_flat.imag, s=10, c=c, cmap="viridis")
-        ax_sent.set_title("Sent")
+        ax_sent.set_title(sent_title)
         sc = ax_recv.scatter(recv_np_flat.real, recv_np_flat.imag, s=10, c=c, cmap="viridis")
         # overlay reference constellation symbols as red X's
         ax_recv.scatter(sent_np_flat.real, sent_np_flat.imag, s=30, marker="x", c="red", linewidth=1.5, alpha=0.7, label="Reference")
 
-        title = "Received"
+        title = rec_title
         if channel_id or channel_type or evm is not None:
             parts = []
             if channel_id:
@@ -361,7 +407,7 @@ class EncoderDecoderGridSearch(GridSearchBase):
                 parts.append(channel_type)
             if evm is not None:
                 parts.append(f"EVM={evm:.2f}%")
-            title = "Received (" + " | ".join(parts) + ")"
+            title = f"{rec_title} (" + " | ".join(parts) + ")"
         ax_recv.set_title(title)
         ax_recv.legend(fontsize=8, loc="upper right")
 
@@ -373,4 +419,342 @@ class EncoderDecoderGridSearch(GridSearchBase):
         fig.colorbar(sc, ax=[ax_sent, ax_recv], label="Carrier Frequency (Hz)")
         fig.suptitle(run_dir.name)
         (run_dir / "plots").mkdir(parents=True, exist_ok=True)
-        fig.savefig(run_dir / "plots" / "constellation.png", dpi=120)
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S").replace(" ", "").replace(":", "-")
+        fig.savefig(run_dir / "plots" / f"constellation_{sent_title}_{rec_title}_{current_time}.png", dpi=120)
+
+    def _plot_constellation_enhanced_for_sv(self, run_dir, sv, py, freqs, channel_id=None, channel_type=None, evm_sv=None, evm_py=None):
+        '''Sent vs received QPSK symbols on the active carriers, coloured by
+        carrier frequency. Received plot overlays sent symbols as red X markers for reference.'''
+        if len(sv) < 4 or len(py) < 4:
+            raise ValueError("sv and py must each contain at least 4 frequency tensors: sent, encoded, channel output, decoded")
+
+        fig, axes = plt.subplots(2, 8, figsize=(44, 10))
+       # axes = fig.subplots(2, 8)
+
+        def plot_stage(ax, main, freqs, title, reference=None):
+            main_np = main.detach().cpu().numpy()
+            c = np.tile(freqs.detach().cpu().numpy(), main_np.shape[0])
+            main_flat = main_np.ravel()
+            ax.scatter(main_flat.real, main_flat.imag, s=10, c=c, cmap="viridis")
+            if reference != None:
+                ref_np = reference.detach().cpu().numpy()
+                ref_flat = ref_np.ravel()
+                ax.scatter(ref_flat.real, ref_flat.imag, s=30, marker="x", c="red", linewidth=1.5, alpha=0.7, label="Reference")
+                ax.legend(fontsize=8, loc="upper right")
+            ax.set_title(title)
+            ax.set_xlabel("In-Phase")
+            ax.set_ylabel("Quadrature")
+            ax.grid(True)
+            ax.set_aspect("equal", "box")
+
+        pairs = [
+            ("Sent", "Encoded", 0, 1),
+            ("Encoded", "Recieved", 1, 2),
+            ("Recieved", "Decoded", 2, 3),
+            ("Sent", "Decoded", 0, 3),
+        ]
+        rows = [(sv, "SystemVerilog", evm_sv), (py, "Pytorch", evm_py)]
+
+        for row_idx, (tensor_list, label, row_evm) in enumerate(rows):
+            for pair_idx, (left_name, right_name, left_idx, right_idx) in enumerate(pairs):
+                left_ax = axes[row_idx, pair_idx * 2]
+                right_ax = axes[row_idx, pair_idx * 2 + 1]
+                plot_stage(left_ax, tensor_list[left_idx], freqs,
+                           f"{left_name} ({label})")
+                plot_stage(right_ax, tensor_list[right_idx], freqs,
+                           f"{right_name} ({label}) ref: {left_name}", reference=tensor_list[left_idx])
+
+            # Last plot in the row is the "Decoded" plot (pair_idx=3, right_ax) —
+            # annotate its EVM just to the right of it.
+            if row_evm is not None:
+                last_ax = axes[row_idx, -1]
+                last_ax.text(1.15, 0.5, f"EVM={row_evm:.2f}%",
+                              transform=last_ax.transAxes,
+                              fontsize=11, fontweight="bold",
+                              ha="left", va="center",
+                              rotation=0)
+
+        fig.colorbar(axes[0, 0].collections[0], ax=axes.flatten().tolist(), label="Carrier Frequency (Hz)")
+
+        title_parts = []
+        if channel_id:
+            title_parts.append(channel_id)
+        if channel_type:
+            title_parts.append(channel_type)
+        if title_parts:
+            fig.suptitle(f"{run_dir.name} — " + " | ".join(title_parts))
+        else:
+            fig.suptitle(run_dir.name)
+
+        (run_dir / "plots").mkdir(parents=True, exist_ok=True)
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S").replace(" ", "").replace(":", "-")
+        fig.savefig(run_dir / "plots" / f"constellation_{current_time}.png", dpi=120)
+        return fig
+
+    # def _plot_evm_vs_bitwidth(self, run_dir, show_best_line=False):
+    #     data = self.all_metrics
+    #     bit_widths_all = [d.get("bit_width") for d in data if "bit_width" in d]
+    #     rrmse_all = [d.get("rrmse_pct") for d in data if "bit_width" in d]
+
+    #     if len(bit_widths_all) != len(rrmse_all):
+    #         raise ValueError("bit_width and rrmse_pct must be present for every point")
+    #     if len(bit_widths_all) == 0:
+    #         return
+
+    #     dot_color = "#2E86AB"
+    #     line_color = "#E4572E"
+
+    #     fig = Figure(figsize=(9, 6), dpi=150)
+    #     ax = fig.add_subplot(111)
+    #     ax.invert_xaxis()
+
+    #     # Scatter every point (duplicates per bit width included)
+    #     ax.scatter(bit_widths_all, rrmse_all, s=70, color=dot_color,
+    #             edgecolor="white", linewidth=1.0, zorder=3,
+    #             label="RRMSE (%)")
+
+    #     # Compute min rrmse per bit width, for optional line + annotations
+    #     best_by_bw = {}
+    #     for bw, r in zip(bit_widths_all, rrmse_all):
+    #         if bw not in best_by_bw or r < best_by_bw[bw]:
+    #             best_by_bw[bw] = r
+
+    #     sorted_bws = sorted(best_by_bw.keys(), reverse=True)
+    #     best_rrmse = [best_by_bw[bw] for bw in sorted_bws]
+
+    #     if show_best_line:
+    #         ax.plot(sorted_bws, best_rrmse, linestyle="--", linewidth=1.5,
+    #                 color=line_color, zorder=2, label="Best RRMSE per bit width")
+
+    #     # Annotate only the min-per-bitwidth points
+    #     for bw, r in zip(sorted_bws, best_rrmse):
+    #         ax.annotate(f"{r:.2f}%", (bw, r), textcoords="offset points",
+    #                     xytext=(0, 10), ha="center", fontsize=8.5, color=line_color)
+
+    #     ax.set_xlabel("Bit Width", fontsize=12, fontweight="bold")
+    #     ax.set_ylabel("RRMSE (%)", fontsize=12, fontweight="bold")
+    #     ax.set_title("RRMSE vs. Bit Width", fontsize=14, fontweight="bold", pad=15)
+
+    #     ax.set_xticks(sorted(set(bit_widths_all), reverse=True))
+    #     ax.margins(y=0.15)
+    #     ax.grid(True, alpha=0.3)
+    #     ax.legend(fontsize=10, frameon=True, framealpha=0.9, loc="upper right")
+    #     ax.tick_params(labelsize=10)
+
+    #     for spine in ("top", "right"):
+    #         ax.spines[spine].set_visible(False)
+
+    #     fig.tight_layout()
+
+    #     plots_dir = run_dir / "plots"
+    #     plots_dir.mkdir(parents=True, exist_ok=True)
+    #     out_path = plots_dir / "rrmse_vs_bitwidth.png"
+    #     fig.savefig(out_path, dpi=120)
+    #     #print(f"Saved plot to {out_path}")
+
+    #     return fig, ax
+    # def _plot_evm_vs_energy(self, run_dir, show_best_line=False):
+    #     data = self.all_metrics
+    #     energy_all = [d.get("energy") for d in data if "energy" in d]
+    #     rrmse_all = [d.get("rrmse_pct") for d in data if "energy" in d]
+
+    #     if len(energy_all) != len(rrmse_all):
+    #         raise ValueError("bit_width and energy must be present for every point")
+    #     if len(energy_all) == 0:
+    #         return
+
+    #     dot_color = "#2E86AB"
+    #     line_color = "#E4572E"
+
+    #     fig = Figure(figsize=(9, 6), dpi=150)
+    #     ax = fig.add_subplot(111)
+    #     ax.invert_xaxis()
+
+    #     # Scatter every point (duplicates per bit width included)
+    #     ax.scatter(energy_all, rrmse_all, s=70, color=dot_color,
+    #             marker="x", linewidth=1.0, zorder=3,
+    #             label="RRMSE (%)")
+
+    #     # Compute min rrmse per bit width, for optional line + annotations
+    #     best_by_bw = {}
+    #     for bw, r in zip(energy_all, rrmse_all):
+    #         if bw not in best_by_bw or r < best_by_bw[bw]:
+    #             best_by_bw[bw] = r
+
+    #     sorted_bws = sorted(best_by_bw.keys(), reverse=True)
+    #     best_rrmse = [best_by_bw[bw] for bw in sorted_bws]
+
+    #     if show_best_line:
+    #         ax.plot(sorted_bws, best_rrmse, linestyle="--", linewidth=1.5,
+    #                 color=line_color, zorder=2, label="Best RRMSE per energy")
+
+    #     # Annotate only the min-per-bitwidth points
+    #     for bw, r in zip(sorted_bws, best_rrmse):
+    #         ax.annotate(f"{r:.2f}%", (bw, r), textcoords="offset points",
+    #                     xytext=(0, 10), ha="center", fontsize=8.5, color=line_color)
+
+    #     ax.set_xlabel("Energy (J)", fontsize=12, fontweight="bold")
+    #     ax.set_ylabel("RRMSE (%)", fontsize=12, fontweight="bold")
+    #     ax.set_title("RRMSE vs. Energy (J)", fontsize=14, fontweight="bold", pad=15)
+
+    #     ax.set_xticks(sorted(set(energy_all), reverse=True))
+    #     ax.margins(y=0.15)
+    #     ax.grid(True, alpha=0.3)
+    #     ax.legend(fontsize=10, frameon=True, framealpha=0.9, loc="upper right")
+    #     ax.tick_params(labelsize=10)
+
+    #     for spine in ("top", "right"):
+    #         ax.spines[spine].set_visible(False)
+
+    #     fig.tight_layout()
+
+    #     plots_dir = run_dir / "plots"
+    #     plots_dir.mkdir(parents=True, exist_ok=True)
+    #     out_path = plots_dir / "rrmse_vs_energy.png"
+    #     fig.savefig(out_path, dpi=120)
+    #     #print(f"Saved plot to {out_path}")
+
+    #     return fig, ax
+    def _get_name_color_map(self, names):
+        unique_names = sorted(list(set(names)))
+        num_names = len(unique_names)
+        if num_names <= 10:
+            cmap = plt.get_cmap("tab10")
+            colors = [cmap(i) for i in range(num_names)]
+        else:
+            cmap = plt.get_cmap("gist_rainbow")
+            colors = [cmap(i / num_names) for i in range(num_names)]
+        return dict(zip(unique_names, colors))
+    
+    def _plot_evm_vs_bitwidth(self, run_dir, show_best_line=False):
+        data = [d for d in self.all_metrics if "bit_width" in d and "rrmse_pct" in d]
+        if not data:
+            return None
+
+        line_color = "#E4572E"
+        names = [d.get("name", "Unknown") for d in data]
+        color_map = self._get_name_color_map(names)
+
+        fig = Figure(figsize=(9, 6), dpi=150)
+        ax = fig.add_subplot(111)
+
+        # Plot each point grouped by metric 'name' to generate distinct colors & legend entries
+        plotted_names = set()
+        for d in data:
+            bw = d["bit_width"]
+            rrmse = d["rrmse_pct"]
+            name = d.get("name", "Unknown")
+            lbl = name if name not in plotted_names else None
+            plotted_names.add(name)
+
+            ax.scatter(bw, rrmse, s=70, color=color_map[name],
+                       marker="x", linewidth=1.0, zorder=3, label=lbl)
+
+        # Compute min rrmse per bit width
+        best_by_bw = {}
+        for d in data:
+            bw = d["bit_width"]
+            r = d["rrmse_pct"]
+            if bw not in best_by_bw or r < best_by_bw[bw]:
+                best_by_bw[bw] = r
+
+        sorted_bws = sorted(best_by_bw.keys(), reverse=True)
+        best_rrmse = [best_by_bw[bw] for bw in sorted_bws]
+
+        if show_best_line:
+            ax.plot(sorted_bws, best_rrmse, linestyle="--", linewidth=1.5,
+                    color=line_color, zorder=2, label="Best RRMSE per bit width")
+
+        # Annotate min-per-bitwidth points
+        for bw, r in zip(sorted_bws, best_rrmse):
+            ax.annotate(f"{r:.2f}%", (bw, r), textcoords="offset points",
+                        xytext=(0, 10), ha="center", fontsize=8.5, color=line_color)
+
+        ax.set_xlabel("Bit Width", fontsize=12, fontweight="bold")
+        ax.set_ylabel("RRMSE (%)", fontsize=12, fontweight="bold")
+        ax.set_title("RRMSE vs. Bit Width", fontsize=14, fontweight="bold", pad=15)
+
+        all_bws = [d["bit_width"] for d in data]
+        ax.set_xticks(sorted(set(all_bws), reverse=True))
+        ax.invert_xaxis()
+        ax.margins(y=0.15)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=9, frameon=True, framealpha=0.9, loc="upper right")
+        ax.tick_params(labelsize=10)
+
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+
+        fig.tight_layout()
+
+        plots_dir = run_dir / "plots"
+        plots_dir.mkdir(parents=True, exist_ok=True)
+        out_path = plots_dir / "rrmse_vs_bitwidth.png"
+        fig.savefig(out_path, dpi=120)
+
+        return fig, ax
+
+    def _plot_evm_vs_energy(self, run_dir, show_best_line=False):
+        data = [d for d in self.all_metrics if "energy" in d and "rrmse_pct" in d]
+        if not data:
+            return None
+
+        line_color = "#E4572E"
+        names = [d.get("name", "Unknown") for d in data]
+        color_map = self._get_name_color_map(names)
+
+        fig = Figure(figsize=(9, 6), dpi=150)
+        ax = fig.add_subplot(111)
+
+        # Plot each point grouped by metric 'name'
+        plotted_names = set()
+        for d in data:
+            eng = d["energy"]
+            rrmse = d["rrmse_pct"]
+            name = d.get("name", "Unknown")
+            lbl = name if name not in plotted_names else None
+            plotted_names.add(name)
+
+            ax.scatter(eng, rrmse, s=70, color=color_map[name],
+                       marker="x", linewidth=1.5, zorder=3, label=lbl)
+
+        # Compute min rrmse per energy level
+        best_by_energy = {}
+        for d in data:
+            e = d["energy"]
+            r = d["rrmse_pct"]
+            if e not in best_by_energy or r < best_by_energy[e]:
+                best_by_energy[e] = r
+
+        sorted_energy = sorted(best_by_energy.keys())
+        best_rrmse = [best_by_energy[e] for e in sorted_energy]
+
+        if show_best_line:
+            ax.plot(sorted_energy, best_rrmse, linestyle="--", linewidth=1.5,
+                    color=line_color, zorder=2, label="Best RRMSE per energy")
+
+        # Annotate min-per-energy points
+        for e, r in zip(sorted_energy, best_rrmse):
+            ax.annotate(f"{r:.2f}%", (e, r), textcoords="offset points",
+                        xytext=(0, 10), ha="center", fontsize=8.5, color=line_color)
+
+        ax.set_xlabel("Energy (pJ per clk cycle)", fontsize=12, fontweight="bold")
+        ax.set_ylabel("RRMSE (%)", fontsize=12, fontweight="bold")
+        ax.set_title("RRMSE vs. Energy (pJ per clk cycle)", fontsize=14, fontweight="bold", pad=15)
+
+        ax.margins(y=0.15)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=9, frameon=True, framealpha=0.9, loc="upper right")
+        ax.tick_params(labelsize=10)
+
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+
+        fig.tight_layout()
+
+        plots_dir = run_dir / "plots"
+        plots_dir.mkdir(parents=True, exist_ok=True)
+        out_path = plots_dir / "rrmse_vs_energy.png"
+        fig.savefig(out_path, dpi=120)
+
+        return fig, ax

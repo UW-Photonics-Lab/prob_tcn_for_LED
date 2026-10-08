@@ -164,3 +164,7 @@ def get_constellation(mode: str):
     if mode == "m7_apsk_constellation":
         return RingShapedConstellation(filename=os.path.join(base, "m7_apsk_constellation.npy"))
     return None
+
+if __name__ == "__main__":
+    s = QPSK_Constellation()
+    s.visualize_constellation()
