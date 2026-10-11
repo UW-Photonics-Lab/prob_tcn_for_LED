@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 import matplotlib.pyplot as plt
 from matplotlib.ticker import LogLocator, NullFormatter
@@ -53,14 +54,14 @@ RUN_CONFIGS = [
         "ed_val_exp_dir":  "data/experiments/train_and_validate/rough_peak_ed_validation_20260930_1701",
         "dataset_path":    "data/sweeps/calm_heath_dc0.08A_fmin1e+06_fmax1.08e+07_20260729_1339.zarr",
     },
-    # {
-    #     "label": "120 mA",
-    #     "dc_ma": 120,
-    #     "channel_exp_dir": "data/experiments/train_and_validate/light_sea_channel_models_20260813_2059",
-    #     "ed_exp_dir":      "data/experiments/train_and_validate/tame_flare_encoder_decoder_20260816_2213",
-    #     "ed_val_exp_dir":  "data/experiments/train_and_validate/tame_flare_ed_validation_20260817_0004",
-    #     "dataset_path":    "data/sweeps/mild_star_dc0.12A_fmin1e+06_fmax1.3e+07_20260802_2119.zarr",
-    # },
+    {
+        "label": "120 mA",
+        "dc_ma": 120,
+        "channel_exp_dir": "data/experiments/train_and_validate/firm_fern_channel_models_20261005_1518",
+        "ed_exp_dir":      "data/experiments/train_and_validate/firm_fern_encoder_decoder_20261006_0352",
+        "ed_val_exp_dir":  "data/experiments/train_and_validate/firm_fern_ed_validation_20261008_0006",
+        "dataset_path":    "data/sweeps/mild_star_dc0.12A_fmin1e+06_fmax1.3e+07_20260802_2119.zarr",
+    },
 ]
 
 # Restrict which channel-model families appear in the plots. None means all.
@@ -72,6 +73,7 @@ N_POWER_BINS    = 10       # bins for plot 1
 MAX_QQ_SAMPLES  = 10_000  # downsample for Q-Q speed
 SHOW_RUN_IN_TITLE = False 
 PARETO_TITLE = "Median Pareto Front for 10 E/Ds per Channel Model"
+PARETO_EXCESS_TITLE = "Median Pareto Front of EVM in Excess of the Noise Floor"
 PRED_VS_ACTUAL_TITLE = "Predicted vs. Actual EVM% across Pareto Sweep Runs"
 PACKET_TITLE = "Predicted Response of Best Gaussian TCN Channel Model"
 VAL_RRMSE_TITLE = "Validation RRMSE% vs. Sent Power"
@@ -461,7 +463,22 @@ SEED_DOT_ALPHA = 0.2
 SEED_DOT_SIZE = 3
 PARETO_SHOW_SEED_DOTS = True   # scatter each E/D seed's EVM behind the pareto line
 
-def plot_pareto_evm(run_configs: list[dict]) -> None:
+
+def noise_floor_evm_pct(ed_val_exp_dir: str, validation_run_id: str) -> float:
+    """Additive-noise EVM% of one validation run"""
+    group = zarr.open_group(_resolve(ed_val_exp_dir) / "validation.zarr", mode="r")[validation_run_id]
+    replays = group["noise_floor_replays"][:]
+    reference = group["noise_floor_reference"][:]
+    noise_power = np.var(replays, axis=0, ddof=1)
+    return float(np.sqrt(noise_power.sum() / np.sum(np.abs(reference) ** 2)) * 100)
+
+
+def plot_pareto_evm(run_configs: list[dict], excess_over_noise_floor: bool) -> None:
+    """With excess_over_noise_floor, each seed's value is sqrt(EVM² - floor²) using that run's own
+    floor. Errors add as powers, so this is the part of the EVM the channel model can still
+    remove, and a log axis keeps differences visible as it approaches zero. The value is signed:
+    a seed measured below its floor estimate goes negative and drops off the log axis, and those
+    seeds are counted instead."""
     n = len(run_configs)
 
     fig, axes_flat, needs_ylabel, needs_xlabel = _panel_grid(n)
@@ -473,14 +490,26 @@ def plot_pareto_evm(run_configs: list[dict]) -> None:
         validation_rows = _read_jsonl(_resolve(cfg["ed_val_exp_dir"]) / "runs.jsonl")
         trial_evms = per_trial_evm(cfg["ed_val_exp_dir"], active_carrier_indices)
 
-        # every E/D validated against a channel model, one mean EVM per seed
+        # every E/D validated against a channel model, one value per seed
         seeds_per_channel: dict[str, list] = {}
         for validation_row in validation_rows:
             channel_run_id = validation_row.get("channel_run_id")
             if channel_run_id is None:
                 continue
             trials = trial_evms.get(validation_row["run_id"], np.array([validation_row.get("evm_pct", float("nan"))]))
-            seeds_per_channel.setdefault(channel_run_id, []).append(float(np.nanmean(trials)))
+
+            if excess_over_noise_floor:
+                floor_evm = noise_floor_evm_pct(cfg["ed_val_exp_dir"], validation_row["run_id"])
+                excess_squared = float(np.nanmean(trials ** 2)) - floor_evm ** 2
+                seed_value = float(np.sign(excess_squared) * np.sqrt(abs(excess_squared)))
+            else:
+                seed_value = float(np.nanmean(trials))
+            seeds_per_channel.setdefault(channel_run_id, []).append(seed_value)
+
+        if excess_over_noise_floor:
+            all_seed_values = np.concatenate([np.asarray(values) for values in seeds_per_channel.values()])
+            below_floor_count = int(np.sum(all_seed_values <= 0))
+            print(f"  {cfg['label']}: {below_floor_count} of {len(all_seed_values)} seeds measured below their noise floor")
 
         traces: dict[tuple, list] = {}
         for channel_run_id, seed_evms in seeds_per_channel.items():
@@ -521,25 +550,30 @@ def plot_pareto_evm(run_configs: list[dict]) -> None:
                             markeredgecolor="none", alpha=SEED_DOT_ALPHA, zorder=2)
 
         _decade_only_log_xaxis(ax)
-        ax.set_ylim(top=15)
+        if excess_over_noise_floor:
+            ax.set_yscale("log")
+        else:
+            ax.set_ylim(top=15)
         ax.set_title(f"{cfg['dc_ma']} mA", fontsize=_FONT)
         ax.grid(True, which="both")
         ax.text(0.05, 0.95, _PANEL_LABELS[panel_index], transform=ax.transAxes,
                 fontsize=_FONT, va="top", ha="left")
         ax.tick_params(labelbottom=True)
         if needs_ylabel[panel_index]:
-            ax.set_ylabel("Experimental EVM (%)")
+            ax.set_ylabel("EVM in Excess of Noise Floor (%)" if excess_over_noise_floor else "Experimental EVM (%)")
 
         if needs_xlabel[panel_index]:
             ax.set_xlabel("Channel Model Parameter Count")
 
-    fig.suptitle(PARETO_TITLE + _run_suffix(run_configs[0]), fontsize=_FONT)
+    title = PARETO_EXCESS_TITLE if excess_over_noise_floor else PARETO_TITLE
+    fig.suptitle(title + _run_suffix(run_configs[0]), fontsize=_FONT)
 
     axes_flat[0].legend(fontsize=_SMALL, handlelength=2, markerscale=0.8,
                         labelspacing=0.3, borderpad=0.4)
 
-    plt.savefig(PLOT_PATH / "pareto_evm.svg", format="svg", bbox_inches="tight")
-    plt.savefig(PLOT_PATH / "pareto_evm.png", bbox_inches="tight")
+    file_stem = "pareto_excess_evm" if excess_over_noise_floor else "pareto_evm"
+    plt.savefig(PLOT_PATH / f"{file_stem}.svg", format="svg", bbox_inches="tight")
+    plt.savefig(PLOT_PATH / f"{file_stem}.png", bbox_inches="tight")
     plt.show()
 
 
@@ -1066,6 +1100,91 @@ def best_validation_run_for_channel(ed_val_exp_dir, channel_run_id, active_carri
                    ed_val_exp_dir, run["run_id"], active_carrier_indices))))["run_id"]
 
 
+# TABLE: Gaussian achievable rate per channel-model family
+def gaussian_rate_bps(evm_pct_per_carrier: np.ndarray, subcarrier_spacing_hz: float,
+                      cyclic_prefix_fraction: float) -> float:
+    """Rate if each carrier were an independent Gaussian-input channel at SNR = 1 / EVM².
+    The residual distortion is treated as Gaussian noise, and the preamble as frame overhead."""
+    snr = 1 / (evm_pct_per_carrier / 100) ** 2
+    symbol_duration_s = (1 + cyclic_prefix_fraction) / subcarrier_spacing_hz
+    return float(np.sum(np.log2(1 + snr)) / symbol_duration_s)
+
+
+def rate_tables(run_configs: list[dict]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Two tables with one row per DC bias and channel-model family, each value a median over
+    the channel model's E/D seeds. Each seed's rate is compared with the noise-floor rate from
+    that same run's replays. The first table reports the family's channel model with the
+    highest rate, the second its smallest channel model."""
+    channel_rows = []
+    for cfg in run_configs:
+        dataset_attrs = dict(zarr.open_group(_resolve(cfg["dataset_path"]), mode="r").attrs)
+        active_carrier_indices = np.array(dataset_attrs["active_carrier_indices"])
+        subcarrier_spacing_hz = float(dataset_attrs["f_min_hz"]) / active_carrier_indices[0]
+        used_band_hz = len(active_carrier_indices) * subcarrier_spacing_hz
+
+        validation = zarr.open_group(_resolve(cfg["ed_val_exp_dir"]) / "validation.zarr", mode="r")
+        validation_rows = _read_jsonl(_resolve(cfg["ed_val_exp_dir"]) / "runs.jsonl")
+        channel_by_run_id = {row["run_id"]: row for row in load_channel_runs(cfg["channel_exp_dir"])}
+
+        seeds_per_channel: dict[str, list] = {}
+        for validation_row in validation_rows:
+            run_id = validation_row["run_id"]
+            fft_length = validation[run_id]["sent_time"].shape[1]
+            cyclic_prefix_fraction = int(dataset_attrs["cyclic_prefix_length"]) / fft_length
+
+            ed_evm = validation_run_evm_vs_frequency(cfg["ed_val_exp_dir"], run_id, active_carrier_indices)
+            floor_evm = noise_floor_evm_vs_frequency(cfg["ed_val_exp_dir"], run_id)
+            ed_rate = gaussian_rate_bps(ed_evm, subcarrier_spacing_hz, cyclic_prefix_fraction)
+            floor_rate = gaussian_rate_bps(floor_evm, subcarrier_spacing_hz, cyclic_prefix_fraction)
+            seeds_per_channel.setdefault(validation_row["channel_run_id"], []).append((ed_rate, floor_rate))
+
+        for channel_run_id, seeds in seeds_per_channel.items():
+            channel_run = channel_by_run_id[channel_run_id]
+            ed_rates = np.array([ed_rate for ed_rate, _ in seeds])
+            floor_rates = np.array([floor_rate for _, floor_rate in seeds])
+
+            channel_rows.append({
+                "dc_ma": cfg["dc_ma"],
+                "family_key": (channel_run["model"], channel_run.get("distribution") or "none"),
+                "channel_run_id": channel_run_id,
+                "num_params": channel_run["num_params"],
+                "spectral_efficiency_bps_per_hz": float(np.median(ed_rates)) / used_band_hz,
+                "noise_floor_rate_mbps": float(np.median(floor_rates)) / 1e6,
+                "pct_of_noise_floor_rate": float(np.median(100 * ed_rates / floor_rates)),
+            })
+
+    table_specs = [
+        ("highest rate", lambda row: row["spectral_efficiency_bps_per_hz"], "rate_table_by_rate"),
+        ("fewest parameters", lambda row: -row["num_params"], "rate_table_smallest"),
+    ]
+    tables = []
+    for selection_name, selection_score, file_stem in table_specs:
+        best_by_group: dict[tuple, dict] = {}
+        for row in channel_rows:
+            group = (row["dc_ma"], row["family_key"])
+            if group not in best_by_group or selection_score(row) > selection_score(best_by_group[group]):
+                best_by_group[group] = row
+
+        sorted_groups = sorted(best_by_group, key=lambda group: (group[0], _model_type_sort_key(group[1])))
+        table = pd.DataFrame.from_records([
+            {"dc_ma": dc_ma,
+             "family": _model_type_label(*family_key),
+             "channel_run_id": best_by_group[(dc_ma, family_key)]["channel_run_id"],
+             "num_params": best_by_group[(dc_ma, family_key)]["num_params"],
+             "spectral_efficiency_bps_per_hz": best_by_group[(dc_ma, family_key)]["spectral_efficiency_bps_per_hz"],
+             "noise_floor_rate_mbps": best_by_group[(dc_ma, family_key)]["noise_floor_rate_mbps"],
+             "pct_of_noise_floor_rate": best_by_group[(dc_ma, family_key)]["pct_of_noise_floor_rate"]}
+            for dc_ma, family_key in sorted_groups
+        ])
+        table.to_csv(PLOT_PATH / f"{file_stem}.csv", index=False)
+
+        print(f"\nChannel model per family with the {selection_name}:")
+        print(table.drop(columns="channel_run_id").to_string(index=False, float_format=lambda value: f"{value:.2f}"))
+        tables.append(table)
+
+    return tables[0], tables[1]
+
+
 
 
 # MAIN
@@ -1080,7 +1199,10 @@ if __name__ == "__main__":
     plot_val_rrmse_vs_params(run_configs)
 
     print("Plot 3 - Pareto: channel params vs experimental EVM% ...")
-    plot_pareto_evm(run_configs)
+    plot_pareto_evm(run_configs, excess_over_noise_floor=False)
+
+    print("Plot 3b - Pareto: channel params vs EVM in excess of the noise floor ...")
+    plot_pareto_evm(run_configs, excess_over_noise_floor=True)
 
     # print("Plot 4 - Channel RRMSE (aggregate vs operating band) vs paired-encoder EVM ...")
     # plot_rrmse_evm_scatter(run_configs)
@@ -1090,6 +1212,9 @@ if __name__ == "__main__":
 
     print("Plot 6 - Best E/D end-to-end residual vs estimated noise floor ...")
     plot_best_ed_noise_floor(run_configs)
+
+    print("Tables - Gaussian achievable rate per channel-model family ...")
+    rate_tables(run_configs)
 
     # print("Plot 7 - Gaussian wave packet TCN response ...")
     # plot_packet_response(run_configs)
