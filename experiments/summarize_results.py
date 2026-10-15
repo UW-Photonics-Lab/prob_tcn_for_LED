@@ -534,13 +534,11 @@ def plot_pareto_evm(run_configs: list[dict], excess_over_noise_floor: bool) -> N
 
             # solid line tracks the pareto front (best median so far with increasing params)
             pareto_evms = np.minimum.accumulate(median_evms)
+            on_front = median_evms == pareto_evms
             ax.plot(param_counts, pareto_evms, color=style["color"], linestyle="-",
                     linewidth=1.2, alpha=0.85, zorder=3,
+                    marker=style["marker"], markersize=3, markevery=list(on_front),
                     drawstyle="steps-post", label=_model_type_label(model, dist))
-            on_front = median_evms == pareto_evms
-            ax.plot(param_counts[on_front], median_evms[on_front], linestyle="none",
-                    marker=style["marker"], markersize=3,
-                    color=style["color"], alpha=0.85, zorder=4)
 
             if PARETO_SHOW_SEED_DOTS:
                 for point in points:
@@ -568,7 +566,7 @@ def plot_pareto_evm(run_configs: list[dict], excess_over_noise_floor: bool) -> N
     title = PARETO_EXCESS_TITLE if excess_over_noise_floor else PARETO_TITLE
     fig.suptitle(title + _run_suffix(run_configs[0]), fontsize=_FONT)
 
-    axes_flat[0].legend(fontsize=_SMALL, handlelength=2, markerscale=0.8,
+    axes_flat[0].legend(loc="upper right", fontsize=_SMALL, handlelength=2, markerscale=0.8,
                         labelspacing=0.3, borderpad=0.4)
 
     file_stem = "pareto_excess_evm" if excess_over_noise_floor else "pareto_evm"
