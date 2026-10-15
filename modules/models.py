@@ -1,10 +1,10 @@
 import math
 
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions.studentT import StudentT
-import matplotlib.pyplot as plt
 
 ACTIVATIONS = {
     "relu": nn.ReLU,
@@ -53,12 +53,15 @@ class TCN(nn.Module):
     BLOCK_CLASS = TCNBlock
     def __init__(self, nlayers=3, dilation_base=2, kernel_size=10, hidden_channels=32, *, activation, **kwargs):
         super().__init__()
+        # one stride per hidden layer
+        strides = kwargs.pop("stride", [1] * nlayers)
+        assert len(strides) == nlayers, f"stride needs one value per layer ({nlayers}), got {strides}"
         layers = []
         in_channels = 1
         for i in range(nlayers):
             dilation = dilation_base ** i
             layers.append(
-                self.BLOCK_CLASS(in_channels, hidden_channels, kernel_size, dilation, activation, **kwargs)
+                self.BLOCK_CLASS(in_channels, hidden_channels, kernel_size, dilation, activation, stride=strides[i], **kwargs)
             )
             in_channels = hidden_channels
         self.tcn = nn.Sequential(*layers)
@@ -169,6 +172,7 @@ class TCN(nn.Module):
 class QxxTCNBlock(TCNBlock):
     def __init__(self, *args, **kwargs):
         self.quantization = kwargs["quantization"]
+        self.stride = kwargs.get("stride", 1)
         super().__init__(*args, **kwargs)
 
     def forward(self, x):
@@ -179,6 +183,7 @@ class QxxTCNBlock(TCNBlock):
             self.conv.weight,
             self.conv.bias,
             dilation=self.conv.dilation[0],
+            stride=self.stride,
         )
         out = self.activation(out)
         if self.resample:
@@ -187,7 +192,10 @@ class QxxTCNBlock(TCNBlock):
                 self.resample.weight,
                 self.resample.bias,
                 dilation=1,
+                stride=self.stride,
             )
+        else:
+            x = x[:, :, self.stride-1::self.stride]  # keep residual aligned with the strided conv output
         return self.quantize(out + x)
 
     def quantize(self, x: torch.Tensor, clamp: bool=True) -> torch.Tensor:
@@ -206,29 +214,35 @@ class QxxTCNBlock(TCNBlock):
 
         return x + (quantized - x).detach()
 
-    def quantized_conv1d(self, x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, dilation: int) -> torch.Tensor:
+    def quantized_conv1d(self, x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, dilation: int, stride: int = 1) -> torch.Tensor:
         """Conv1d where every weight*input product is individually rounded to the
         fixed-point grid before being summed, replicating hidden_channel_block's
         per-tap accumulation. x, weight, bias must already be quantize()'d
         (clamped) before calling this — this function only rounds the products.
         """
+
         weight = self.quantize(weight)
         bias = self.quantize(bias)
         x = self.quantize(x)
 
-        B, Cin, Tp = x.shape
+        B, Cin, Tin = x.shape
         Cout, _, K = weight.shape
-        T_out = Tp - (K - 1) * dilation
+        T_out = Tin - (K - 1) * dilation
+
         acc = x.new_zeros(B, Cout, T_out)
+        # Perform indexing under cross correlation convention
         for k in range(K):
             start = k * dilation
             x_slice = x[:, :, start:start + T_out]                       # [B, Cin, T_out]
             w_k = weight[:, :, k]                                        # [Cout, Cin]
-            prod = x_slice.unsqueeze(1) * w_k.unsqueeze(0).unsqueeze(-1)  # [B, Cout, Cin, T_out]
+            prod = x_slice.unsqueeze(1) * w_k.unsqueeze(0).unsqueeze(-1)  # [B, 1, Cin, T_out] x [1, Cout, Cin, 1] -> [B, Cout, Cin, Tout]
             prod = self.quantize(prod, clamp=False)                       # round no clipping
-            acc = acc + prod.sum(dim=2)                                  # accumulate in full precision, like the int accumulator
+            acc = acc + prod.sum(dim=2)                                  # [B, Cout, Tout] accumulate along input channels in full precision, like the int accumulator
         if bias is not None:
-            acc = acc + bias.view(1, -1, 1)
+            acc = acc + bias.view(1, -1, 1) # [B, Cout, Tout] + [1, Cout, 1]
+            
+        acc = acc[:, :, stride-1::stride]                           # [B, Cout, Tout/S] keep the last sample of each group, like the SV
+
         return acc
 
 class QxxTCN(TCN):
@@ -238,10 +252,14 @@ class QxxTCN(TCN):
         assert self.quantization is not None, "quantization parameter must be defined"
         assert "frac_bits" in self.quantization and "data_width" in self.quantization, 'quantization must contain values for keys "frac_bits" and "data_width"'
         super().__init__(*args, **kwargs)
+        self.data_width = self.quantization["data_width"]
+        self.frac_bits = self.quantization['frac_bits']
 
         throughput = 1
         mults = (kwargs["hidden_channels"] * kwargs["kernel_size"] + kwargs["hidden_channels"]) + ((kwargs["nlayers"]-1) * (kwargs["hidden_channels"] ** 2) * kwargs["kernel_size"]) + (kwargs["hidden_channels"])
         adds = mults - kwargs["hidden_channels"]*kwargs["nlayers"]-1
+
+        #TODO: probably should make a calculate energy method that does this for all TCNS given the energy per calc
         self.energy = ((self.quantization["data_width"] * (0.03/8.0))*adds + ((self.quantization["data_width"]**2) * (0.2/64.0))*mults) * throughput #per clk cycle
     def forward(self, xin):
         x = xin.unsqueeze(1)    # [B,1,T]
@@ -249,7 +267,7 @@ class QxxTCN(TCN):
         out = self.tcn[0].quantized_conv1d(
             out,
             self.readout.weight,
-            self.readout.bias,
+            self.readout.bias, 
             dilation=1,
         ).squeeze(1)
         out = self.tcn[0].quantize(out)
@@ -268,14 +286,16 @@ class AdderTCNBlock(QxxTCNBlock):
 
     def forward(self, x):
         out = F.pad(x, (self.padding, 0))
-        out = self.quantized_conv1d(out, self.conv.weight, self.conv.bias, dilation=self.conv.dilation[0])
+        out = self.quantized_conv1d(out, self.conv.weight, self.conv.bias, dilation=self.conv.dilation[0], stride=self.stride)
         out = self.bn(out)
         out = self.activation(out)
         if self.resample:
-            x = self.quantized_conv1d(x, self.resample.weight, self.resample.bias, dilation=1)
+            x = self.quantized_conv1d(x, self.resample.weight, self.resample.bias, dilation=1, stride=self.stride)
             x = self.bn_resample(x)
+        else:
+            x = x[:, :, self.stride-1::self.stride]
         return self.quantize(out + x)
-    def quantized_conv1d(self, x, weight, bias, dilation):
+    def quantized_conv1d(self, x, weight, bias, dilation, stride=1):
         weight = self.quantize(weight)
         x = self.quantize(x)
 
@@ -292,7 +312,7 @@ class AdderTCNBlock(QxxTCNBlock):
         if bias is not None:
             bias = self.quantize(bias)
             out = out + bias.view(1, -1, 1)
-        return out
+        return out[:, :, stride-1::stride]
 
 class AdderTCN(QxxTCN):
     BLOCK_CLASS = AdderTCNBlock

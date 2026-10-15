@@ -7,28 +7,19 @@ module Qxxmultiply # (parameter int DATA_WIDTH, FRAC_BITS) (
 
 localparam qBitShift = FRAC_BITS;
 logic signed [31:0] product;
-logic signed [31:0] product_out;
-logic signed [DATA_WIDTH-1:0] a;
-logic signed [DATA_WIDTH-1:0] b;
 
 always_ff @(posedge clk) begin
     if (reset) begin
-        a <= '0;
-        b <= '0;
         product <= '0;
-        product_out <= '0;
         final_product <= '0;
     end else begin
-        a <= input_reg;
-        b <= weight;
-        product <= a * b;
-        product_out <= product;
-        final_product <= (product_out + (1 <<< (qBitShift-1))) >>> qBitShift;
+        product <= input_reg * weight;
+        final_product <= (product + (1 <<< (qBitShift-1))) >>> qBitShift; // I eliminated 2 cycles of latency, hopefully this doesn't break timeing - DJ
     end
 end
 endmodule
 
 function automatic int Qxxmultiply_latency();
-    int latency = 4;
+    int latency = 2;
     return latency;
 endfunction

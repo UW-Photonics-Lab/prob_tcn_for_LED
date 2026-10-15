@@ -11,7 +11,7 @@ logic signed [DATA_WIDTH-1:0] bias [0:0];
 //get weights from file todo: add error handling for retrieving from a file - The order of the weights matters in this setup
 initial begin
     string fileName;
-    if (RESAMPLE == 2) begin
+    if (RESAMPLE == 2) begin // TODO: would it be posssible to assign these magic numbers to named localparams as well?
         fileName = $sformatf("TestingData/Test%0d/%s/readout_weight/channel%0d.mem", TEST, MODEL_TYPE, HIDDEN_CH_NUM);
         $readmemh(fileName, weights, 0, NUM_TAPS-1);
 
@@ -93,8 +93,8 @@ generate
         int signed preclipped;
         int signed relu_applied;
 
-        localparam int delay = adder_tree_block_latency(NUM_TAPS + 1) - 1; // Formula for synchronization delay
-        logic signed [DATA_WIDTH-1:0] waiting_line [delay + 1];
+        localparam int delay = adder_tree_block_latency(NUM_TAPS + 1, 2) - 1; // Formula for synchronization delay TODO: why is there a -1 here? 
+        logic signed [DATA_WIDTH-1:0] waiting_line [delay + 1]; // TODO: Maybe just passing delay without the -1 above here would work
         always_ff @(posedge clk) begin
             if (reset) begin
                 unclipped_resampled_input <= 0;
@@ -127,7 +127,7 @@ generate
             else out <= Q88clip(finalSum); // out 10
         end
     end else begin: middle_layer // Below is the default generation for all other layers
-        localparam int delay = adder_tree_block_latency(NUM_TAPS + 1) + Qxxmultiply_latency(); // Formula for synchronization delay (due to adder tree and Qmutliply)
+        localparam int delay = adder_tree_block_latency(NUM_TAPS + 1, 2) + Qxxmultiply_latency(); // Formula for synchronization delay (due to adder tree and Qmutliply)
         logic signed [DATA_WIDTH-1:0] waiting_line [delay + 1];
         
         int signed preclipped;

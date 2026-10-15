@@ -67,7 +67,10 @@ endgenerate
 generate
     for (genvar i = 0; i < OUT_CH; i++) begin: HC_inst
 
-        hidden_channel_block #(.NUM_TAPS(KERNEL_SIZE*IN_CH), .DATA_WIDTH(DATA_WIDTH), .SKIPCONN(KERNEL_SIZE*i + (KERNEL_SIZE-1)), .TEST(TEST), .LAYER_NUM(LAYER_NUM), .HIDDEN_CH_NUM(i), .RESAMPLE(RESAMPLE), .MODEL_TYPE(MODEL_TYPE)) 
+        hidden_channel_block #(.NUM_TAPS(KERNEL_SIZE*IN_CH),
+        .DATA_WIDTH(DATA_WIDTH), .SKIPCONN(KERNEL_SIZE*i + (KERNEL_SIZE-1)),
+        .TEST(TEST), .LAYER_NUM(LAYER_NUM), .HIDDEN_CH_NUM(i), .RESAMPLE(RESAMPLE),
+        .MODEL_TYPE(MODEL_TYPE)) 
                 hc (.counter(counter), .input_reg(actual_input_reg), .clk(clk), .reset(reset), .out(hc_output[i]));
             
     end

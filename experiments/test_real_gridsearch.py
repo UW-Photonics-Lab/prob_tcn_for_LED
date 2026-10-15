@@ -9,30 +9,33 @@ import csv
 import os
 import sys
 from pathlib import Path
-import zarr
+
 import numpy as np
 import torch
 import torch.nn.functional as F
 import yaml
+import zarr
 
 # Ensure repo root is on the path regardless of launch location
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.chdir(Path(__file__).resolve().parents[1])
 
+from pyflux.core.block import Signal
+
 from modules.constellation_diagram import get_constellation
+from modules.experimental_blocks import ModulateDataOFDM
 from modules.grid_search import (
-    ChannelModelGridSearch, EncoderDecoderGridSearch, select_channel_models,
     MODEL_REGISTRY,
+    ChannelModelGridSearch,
+    EncoderDecoderGridSearch,
+    select_channel_models,
 )
 from modules.models import TCN
 from modules.utils import OFDMConfig
-from modules.experimental_blocks import ModulateDataOFDM
-
-from pyflux.core.block import Signal
 
 # ── Experiment output ────────────────────────────────────────────────────────
 EXP_DIR   = Path("data/experiments/test_real_gridsearch")
-DEVICE    = "cuda"
+DEVICE    = "cpu"
 SEED      = 42
 
 # ── Experiment Dataset ────────────────────────────────────────────────────────
@@ -123,30 +126,32 @@ ENCODER_DECODER_GRID = {
                     "dilation_base":   2,
                     "kernel_size":     3,
                     "hidden_channels": 4,
-                    "epochs":          1000,
+                    "epochs":          100,
                     "lr":              1e-3,
                     "weight_decay":    1e-5,
                     "batch_size":      8,
                     "activation":       "relu",
-                    "quantization":     [{"frac_bits": 8, "data_width": 16}, {"frac_bits": 7, "data_width": 14}, {"frac_bits": 7, "data_width": 13}, {"frac_bits": 8, "data_width": 12}, {"frac_bits": 6, "data_width": 11}, {"frac_bits": 5, "data_width": 10}, {"frac_bits": 5, "data_width": 9}, {"frac_bits": 4, "data_width": 8}, {"frac_bits": 3, "data_width": 7}, {"frac_bits": 3, "data_width": 6}, {"frac_bits": 2, "data_width": 5}, {"frac_bits": 2, "data_width": 4}],
+                    "stride":           [[1, 1]],  # one list per point, one value per layer
+                    "quantization":     [{"frac_bits": 8, "data_width": 16}],
             },
         },
-        {
-            "model": "adder_tcn",
-            "params": {
-                    "nlayers":         2,
-                    "dilation_base":   2,
-                    "kernel_size":     3,
-                    "hidden_channels": 4,
-                    "epochs":          1000,
-                    "lr":              0.1, #cosine aneealing start if cosine anealing enabled
-                    "weight_decay":    1e-5,
-                    "batch_size":      8,
-                    "activation":       "relu",
-                    "quantization":     [{"frac_bits": 8, "data_width": 16}, {"frac_bits": 7, "data_width": 14}, {"frac_bits": 7, "data_width": 13}, {"frac_bits": 8, "data_width": 12}, {"frac_bits": 6, "data_width": 11}, {"frac_bits": 5, "data_width": 10}, {"frac_bits": 5, "data_width": 9}, {"frac_bits": 4, "data_width": 8}, {"frac_bits": 3, "data_width": 7}, {"frac_bits": 3, "data_width": 6}, {"frac_bits": 2, "data_width": 5}, {"frac_bits": 2, "data_width": 4}],
-                    "cosineAnnealing_min_lr": 1e-6,
-            },
-        },
+        # {
+        #     "model": "adder_tcn",
+        #     "params": {
+        #             "nlayers":         2,
+        #             "dilation_base":   2,
+        #             "kernel_size":     3,
+        #             "hidden_channels": 4,
+        #             "epochs":          1000,
+        #             "lr":              0.1, #cosine aneealing start if cosine anealing enabled
+        #             "weight_decay":    1e-5,
+        #             "batch_size":      8,
+        #             "activation":       "relu",
+        #             "stride":           [[1, 1]],  # one list per point, one value per layer
+        #             "quantization":     [{"frac_bits": 8, "data_width": 16}, {"frac_bits": 7, "data_width": 14}, {"frac_bits": 7, "data_width": 13}, {"frac_bits": 8, "data_width": 12}, {"frac_bits": 6, "data_width": 11}, {"frac_bits": 5, "data_width": 10}, {"frac_bits": 5, "data_width": 9}, {"frac_bits": 4, "data_width": 8}, {"frac_bits": 3, "data_width": 7}, {"frac_bits": 3, "data_width": 6}, {"frac_bits": 2, "data_width": 5}, {"frac_bits": 2, "data_width": 4}],
+        #             "cosineAnnealing_min_lr": 1e-6,
+        #     },
+        # },
         # {
         #     "model": "shift_tcn",
         #     "params": {
@@ -176,7 +181,7 @@ if __name__ == "__main__":
 
     channel_gs = ChannelModelGridSearch(
         CHANNEL_GRID,
-        dataset_path="data\dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr", 
+        dataset_path="data/dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr", 
         experiments_dir=EXP_DIR,
         device=DEVICE,
         seed=SEED,
@@ -206,7 +211,7 @@ if __name__ == "__main__":
     ed_gs = EncoderDecoderGridSearch(
         ENCODER_DECODER_GRID,
         channel_models=best_channels,
-        dataset_path="data\dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr",
+        dataset_path="data/dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr",
         experiments_dir=EXP_DIR,
         device=DEVICE,
         seed=SEED,

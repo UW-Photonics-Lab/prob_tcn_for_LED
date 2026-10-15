@@ -21,6 +21,7 @@ dependencies:
   - seaborn
   - pyserial
   - ipykernel
+  - pytest
   - pip:
       - torch==2.4.1
       - torchaudio==2.4.1

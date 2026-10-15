@@ -3,7 +3,7 @@ module adder_tree_block # (parameter int NUM, DATA_WIDTH, DEPTH=-1, MAX_ADDS=2) 
     input logic signed [0:NUM-1][DATA_WIDTH-1:0] nums,
     output logic signed [31:0] sum
 );
-parameter int depth = (DEPTH >= 0) ? DEPTH: adder_tree_block_latency(NUM);
+parameter int depth = (DEPTH >= 0) ? DEPTH: adder_tree_block_latency(NUM, MAX_ADDS);
 logic [31:0] total;
 
 if (NUM < MAX_ADDS || (NUM == MAX_ADDS && depth == 1)) begin: base_case
@@ -18,16 +18,24 @@ if (NUM < MAX_ADDS || (NUM == MAX_ADDS && depth == 1)) begin: base_case
         else sum <= total;
     end
 end else begin: recursion
-    localparam int floored = NUM / MAX_ADDS;
-    localparam int remainder = NUM % MAX_ADDS;
+    localparam int default_slice_width = NUM / MAX_ADDS;
+    localparam int remainder_count = NUM % MAX_ADDS;
+
+    // Amortize the extra remainder additions by increasing the slice width by 1 remainder times
+    localparam remainder_slice_width = default_slice_width + 1;
 
     logic signed [0:MAX_ADDS-1][31:0] sub_sums;
 
     for (genvar i = 0; i < MAX_ADDS; i++) begin: inst_recurs
-        localparam slice_width = (remainder > i && remainder != 0) ? floored + 1: floored;
-        localparam start_index = (remainder > i) ? i*slice_width: remainder*(slice_width+1) + (i-remainder)*slice_width;
-        localparam end_index = start_index + slice_width - 1;
-        adder_tree_block # (.NUM(slice_width), .DATA_WIDTH(DATA_WIDTH), .DEPTH(depth - 1)) 
+
+        localparam int start_index = (i < remainder_count)
+            ? i * remainder_slice_width
+            : remainder_count * remainder_slice_width + (i - remainder_count) * default_slice_width;
+
+        localparam int end_index = start_index +
+            ((i < remainder_count) ? remainder_slice_width : default_slice_width) - 1;
+
+        adder_tree_block # (.NUM(end_index - start_index + 1), .DATA_WIDTH(DATA_WIDTH), .DEPTH(depth - 1), .MAX_ADDS(MAX_ADDS)) 
         subAdder1 (
             .clk(clk), 
             .reset(reset), 
@@ -49,8 +57,14 @@ end else begin: recursion
 end
 endmodule
 
-function automatic int adder_tree_block_latency(int num);
-    localparam int max_adds = 2;
-    int latency = (num <= 2) ? 1: $floor(($ln((real'(num) - 1.0) / real'(max_adds)) / $ln(real'(max_adds))) + 2);
-    return latency;
+function automatic int adder_tree_block_latency(int num, int max_adds);
+    // Num levels = latency = ceil(log_{max_adds}(num))
+    // Use while loop to avoid floating point silent errors
+    int latency = 0;
+    int MAX_WIDTH = 1;
+    while (MAX_WIDTH < num) begin
+        MAX_WIDTH = MAX_WIDTH * max_adds;
+        latency++;
+    end
+    return (latency < 1) ? 1 : latency; // Minimum latency of 1
 endfunction

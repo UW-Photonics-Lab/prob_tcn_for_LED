@@ -169,26 +169,26 @@ def evm_pct(reference, measured):
     residual_power = (abs(reference - measured) ** 2).mean()
     return (residual_power / (signal_power + 1e-12)) ** 0.5 * 100
 
-def float_to_q88_int(x: float, data_width) -> int:
-    """Convert float → 16-bit Q8.8 signed integer."""
-    scale_factor = data_width // 2
-    maximum = pow(2, data_width-1) - 1
-    minimum = -1 * pow(2, data_width-1)
-    scaled = int(round(x * pow(2, scale_factor)))
-    return max(minimum, min(maximum, scaled))
+def float_to_qxy_int_code(x: float, data_width: int, frac_bits: int) -> int:
+    """Convert float to Qx.y signed integer code"""
+    grid_spacing = 2 ** (-frac_bits)
+    max_value = (2 ** (data_width - 1) - 1)
+    min_value = -(2 ** (data_width - 1))
+    grid_point = int(np.floor(x / grid_spacing + 0.5))
+    return max(min(max_value, grid_point), min_value)
 
-def q88_int_to_hex(v: int, data_width) -> str:
-    """Format a signed Q8.8 integer as 4-digit hex (two's complement), variable for other notations"""
+def qxy_int_to_hex(v: int, data_width) -> str:
+    """Format a signed Q.xx integer as 4-digit hex, variable for other notations"""
     mask = (1 << data_width) - 1
     hex_digits = math.ceil(data_width / 4)
     return f"{v & mask:0{hex_digits}x}"
 
-def q88_hex_to_float(hexa: str, data_width):
+def qxy_hex_to_float(hexa: str, data_width, frac_bits: int):
     sign_bit = 1 << (data_width - 1)
     v = int(hexa, 16)
     if v & sign_bit:  # If the sign bit is set (negative)
         v -= 1 << data_width
-    return v / pow(2, data_width // 2)
+    return v / (2 ** frac_bits)
 
 def save_mem_file(path: str, values: list, comment: str = "", printDebug=True):
     folder = os.path.dirname(path)
@@ -198,8 +198,7 @@ def save_mem_file(path: str, values: list, comment: str = "", printDebug=True):
     with open(path, "w") as f:
         if comment:
             f.write(f"// {comment}\n")
-        for v in values:
-            f.write(v + "\n")
+        f.writelines(v + "\n" for v in values)
 
     if printDebug:
-        print(f"  Saved {len(values)} values → {path}")
+        print(f"  Saved {len(values)} values => {path}")

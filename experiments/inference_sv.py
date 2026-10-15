@@ -6,29 +6,37 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 base_pth = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 print(base_pth)
 
-import subprocess
-import torch
 import json
+import subprocess
+
+import matplotlib.pyplot as plt
+import torch
 import yaml
 import zarr
-import matplotlib.pyplot as plt
-from modules.utils import save_mem_file
-from modules.models import TCN, QxxTCN
+
+from experiments.test_real_gridsearch import ENCODER_DECODER_GRID, OFDM_CONFIG
 from modules.grid_search import EncoderDecoderGridSearch
-from modules.grid_search.encoder_decoder import ARCH_KEYS
 from modules.grid_search.adapters import TCNAdapter
-from modules.utils import q88_int_to_hex, q88_hex_to_float, float_to_q88_int, evm_pct, calculate_per_burst_rrmse_pct_loss 
-from experiments.test_real_gridsearch import (
-    OFDM_CONFIG, ENCODER_DECODER_GRID
+from modules.grid_search.encoder_decoder import ARCH_KEYS
+from modules.models import TCN, QxxTCN
+from modules.utils import (
+    calculate_per_burst_rrmse_pct_loss,
+    evm_pct,
+    float_to_qxy_int_code,
+    qxy_hex_to_float,
+    qxy_int_to_hex,
+    save_mem_file,
 )
+
 FILES = ["input_time_series.mem", "encoder_output.mem", "recieved_time.mem", "decoder_output.mem"]
 
 sim_directory = "sv_tcn/tcn7"
 DATA_WIDTH = 16
+FRAC_BITS = 8  # must match the model's quantization config
 TEST = 1
 SAVE_PATH = f"{sim_directory}"
-ED_MODEL = "data/experiments/test_real_gridsearch/encoder_decoder_20260925_1312/runs/Qxx_tcn_efd24442"
-CHANNEL_PTH = "data/experiments/test_real_gridsearch/channel_models_20260925_1310/runs/tcn_b338d2dc"
+ED_MODEL = "data/experiments/test_real_gridsearch/encoder_decoder_20261014_1557/runs/Qxx_tcn_554d8158"
+CHANNEL_PTH = "data/experiments/test_real_gridsearch/channel_models_20261014_1539/runs/tcn_b338d2dc"
 TCN_NAME = QxxTCN
 DATA_PATH = "data/dc0.052A_fmin300000_fmax7.6e+06_20260630_1743.zarr/sent_burst"
 WAVEFORMS = 4
@@ -40,7 +48,7 @@ ed_gs = EncoderDecoderGridSearch(
 )
 
 
-def create_plots(data_width, sent_time, ShowTimeSeries=False, ed_model_pth=ED_MODEL, plot_title="Qx.x"):
+def create_plots(data_width, frac_bits, sent_time, ShowTimeSeries=False, ed_model_pth=ED_MODEL, plot_title="Qx.x"):
     py_freq = []
     with open(os.path.join(base_pth, ed_model_pth, "config.yaml"), "r") as file:
         config = yaml.safe_load(file)
@@ -91,10 +99,11 @@ def create_plots(data_width, sent_time, ShowTimeSeries=False, ed_model_pth=ED_MO
                 for line in file:
                     line = line.strip()
                     if line[0:2] != "//":
-                        num = q88_hex_to_float(line, data_width)
+                        num = qxy_hex_to_float(line, data_width, frac_bits)
                         time.append(num)
                 all_time_series.append(time)
 
+    #TODO : I feel like this could be a lot more readable and robust to changes if it wasn't depending on the ordering of the .mem files.
     time_tensors = [torch.tensor(all_time_series[0]).view(WAVEFORMS, 940),  torch.tensor(all_time_series[1]).view(WAVEFORMS, 940),  torch.tensor(all_time_series[2]).view(WAVEFORMS, 940), torch.tensor(all_time_series[3]).view(WAVEFORMS, 940)]
 
     freq_tensors = [ed_gs._frame_to_freq(time_tensors[0], OFDM_CONFIG), ed_gs._frame_to_freq(time_tensors[1], OFDM_CONFIG), ed_gs._frame_to_freq(time_tensors[2], OFDM_CONFIG), ed_gs._frame_to_freq(time_tensors[3], OFDM_CONFIG)]
@@ -171,17 +180,17 @@ def create_sent_time():
     else:
         raise ValueError("TYPE was not correctly specified.")
 
-def writeSentTime(save_pth, datawidth):
+def writeSentTime(save_pth, datawidth, frac_bits):
     sent_time = create_sent_time()
     time_series = []
     tensor_time_series = sent_time.detach().cpu().numpy()
-    for burst in tensor_time_series:    
+    for burst in tensor_time_series:
             for point in burst:
-                time_series.append(q88_int_to_hex(float_to_q88_int(point, data_width=datawidth), data_width=datawidth))
+                time_series.append(qxy_int_to_hex(float_to_qxy_int_code(point, data_width=datawidth, frac_bits=frac_bits), data_width=datawidth))
     save_mem_file(os.path.join(base_pth, save_pth, "input_time_series.mem"), time_series, "OFDM modulated time series - includes cyclic prefix and preamble")
     return sent_time
 
-def read_model(read_pth, save_pth, datawidth):
+def read_model(read_pth, save_pth, datawidth, frac_bits):
     output_dir = os.path.join(base_pth, save_pth)
     os.makedirs(output_dir, exist_ok=True)
     model = torch.load(os.path.join(base_pth, read_pth), weights_only=True)
@@ -225,12 +234,15 @@ def read_model(read_pth, save_pth, datawidth):
                 arr = hidden_channel.detach().cpu().numpy().flatten()
                 save_arr = []
                 for num in arr:
-                    hexa = q88_int_to_hex(float_to_q88_int(num, datawidth), datawidth)
+                    hexa = qxy_int_to_hex(float_to_qxy_int_code(num, datawidth, frac_bits), datawidth)
                     #print(f"        Weight/Bias: {num} Hex: {hexa}")
                     save_arr.append(hexa)
 
                 safe_key = key.replace('.', '_')
-                save_mem_file(os.path.join(output_dir, f"{type}", safe_key, f"channel{i}.mem"), save_arr, f"contains {len(arr)} values", printDebug=False)
+                save_mem_file(os.path.join(output_dir, f"{type}", safe_key, f"channel{i}.mem"),
+                              save_arr,
+                              f"contains {len(arr)} values",
+                              printDebug=False)
 
 def send_through_channel(sent_time):
     with open(os.path.join(base_pth, CHANNEL_PTH, "config.yaml"), "r") as file:
@@ -242,28 +254,40 @@ def send_through_channel(sent_time):
             #print(rec_time_tensor)
             return rec_time_tensor[0] # 0 for noise, 1 for mean
 
-def Execute_Channel(data_width, Channel_pth, Save_pth):
+def Execute_Channel(data_width, frac_bits, Channel_pth, Save_pth):
     with open(os.path.join(base_pth, Channel_pth, "config.yaml"), "r") as file:
         sent_time = [[]]
         with open(os.path.join(base_pth, Save_pth, "encoder_output.mem"), "r") as file:
             for line in file:
                 line = line.strip()
                 if line[0:2] != "//":
-                    num = q88_hex_to_float(line, data_width)
+                    num = qxy_hex_to_float(line, data_width, frac_bits)
                     sent_time[0].append(num)
         recieved_time = send_through_channel(torch.tensor(sent_time)).detach().cpu().numpy().flatten()
         words = []
         for sample in recieved_time:
-            words.append(q88_int_to_hex(float_to_q88_int(sample, data_width), data_width))
+            words.append(qxy_int_to_hex(float_to_qxy_int_code(sample, data_width, frac_bits), data_width))
         save_mem_file(os.path.join(base_pth, Save_pth, "recieved_time.mem"), words, f"Sent through the channel model")
 
 if __name__ == "__main__":
-    sent_time = writeSentTime(SAVE_PATH, DATA_WIDTH)
-    read_model(os.path.join(base_pth, ED_MODEL, "model.pt"), os.path.join(base_pth, SAVE_PATH, "TestingData", f"Test{TEST}"), DATA_WIDTH)
+    sent_time = writeSentTime(SAVE_PATH, DATA_WIDTH, FRAC_BITS)
+    read_model(os.path.join(base_pth, ED_MODEL, "model.pt"), os.path.join(base_pth, SAVE_PATH, "TestingData", f"Test{TEST}"), DATA_WIDTH, FRAC_BITS)
+    with open(os.path.join(base_pth, ED_MODEL, "config.yaml"), "r") as file:
+        config = yaml.safe_load(file)
+        p = config["params"]
+        packed_strides = sum(s << (5 * i) for i, s in enumerate(p['stride']))
+        kernel_size = p['kernel_size']
+        layers = p['nlayers']
+        dilation_base = p['dilation_base']
+        hidden_channels = p['hidden_channels']
 
     print("Running encoder...")
     result = subprocess.run(
-        ["iverilog", "-g2012", "-P", f'tb.MODEL_TYPE="encoder"', "-P", f"tb.TEST={TEST}", "-P", f"tb.DATA_WIDTH={DATA_WIDTH}", "-P", f"tb.SAMPLES={940 * WAVEFORMS}", "-o", "tb.vvp", "tb.sv"],
+        ["iverilog", "-g2012", "-P", f'tb.MODEL_TYPE="encoder"',
+         "-P", f"tb.TEST={TEST}", "-P", f"tb.DATA_WIDTH={DATA_WIDTH}", "-P", f"tb.FRAC_BITS={FRAC_BITS}",
+         "-P", f"tb.SAMPLES={940 * WAVEFORMS}", "-P", f"tb.STRIDES={packed_strides}",
+         "-P", f"tb.K={kernel_size}", "-P", f"tb.L={layers}", "-P", f"tb.D={dilation_base}", "-P", f"tb.HC={hidden_channels}",
+         "-o", "tb.vvp", "tb.sv"],
         cwd=sim_directory,
         capture_output=True,
         text=True,
@@ -278,11 +302,14 @@ if __name__ == "__main__":
     )
     
     print("Running Channel Model...")
-    Execute_Channel(DATA_WIDTH, CHANNEL_PTH, SAVE_PATH)
+    Execute_Channel(DATA_WIDTH, FRAC_BITS, CHANNEL_PTH, SAVE_PATH)
     
     print("Running decoder...")
     result3 = subprocess.run(
-        ["iverilog", "-g2012", "-P", f'tb.MODEL_TYPE="decoder"', "-P", f"tb.TEST={TEST}", "-P", f"tb.DATA_WIDTH={DATA_WIDTH}", "-P", f"tb.SAMPLES={940 * WAVEFORMS}", "-o", "tb.vvp", "tb.sv"],
+        ["iverilog", "-g2012", "-P", f'tb.MODEL_TYPE="decoder"', "-P", f"tb.TEST={TEST}",
+         "-P", f"tb.DATA_WIDTH={DATA_WIDTH}", "-P", f"tb.FRAC_BITS={FRAC_BITS}", "-P", f"tb.SAMPLES={940 * WAVEFORMS}", "-P", f"tb.STRIDES={packed_strides}",
+         "-P", f"tb.K={kernel_size}", "-P", f"tb.L={layers}", "-P", f"tb.D={dilation_base}", "-P", f"tb.HC={hidden_channels}",
+         "-o", "tb.vvp", "tb.sv"],
         cwd=sim_directory,
         capture_output=True,
         text=True,
@@ -297,4 +324,4 @@ if __name__ == "__main__":
     )
 
     print("Complete.\n")
-    create_plots(DATA_WIDTH, sent_time, ShowTimeSeries=False, ed_model_pth=os.path.join(base_pth, ED_MODEL))
+    create_plots(DATA_WIDTH, FRAC_BITS, sent_time, ShowTimeSeries=False, ed_model_pth=os.path.join(base_pth, ED_MODEL))

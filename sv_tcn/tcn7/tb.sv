@@ -11,9 +11,11 @@ parameter int K = 5;
 parameter int L = 3;
 parameter int D = 2;
 parameter int HC = 8;
+parameter logic [5*L-1:0] STRIDES = {L{5'd1}};
 
 parameter SAMPLES = 6;
-
+localparam OUT_THROUGHPUT = tcn_layer_throughput(THROUGHPUT, STRIDES, L);
+localparam OUT_SAMPLES = SAMPLES * OUT_THROUGHPUT / THROUGHPUT;
 localparam BUFFER_TIME = 500;
 localparam CLK_TIME = 3;
 localparam UPDATE_TIME = CLK_TIME*2; //calculates time before the next input is sent in
@@ -22,9 +24,9 @@ localparam FINISH_TIME = SAMPLES * $ceil(real'(UPDATE_TIME)/real'(THROUGHPUT)) +
 string filePath = "input_time_series.mem";
 
 logic signed [DATA_WIDTH-1:0] all_samples [SAMPLES];
-logic signed [DATA_WIDTH-1:0] allOutput [SAMPLES];
+logic signed [DATA_WIDTH-1:0] allOutput [OUT_SAMPLES];
 //logic signed [DATA_WIDTH-1:0] desiredOut;
-logic signed [0:THROUGHPUT-1][DATA_WIDTH-1:0] out;
+logic signed [0:OUT_THROUGHPUT-1][DATA_WIDTH-1:0] out;
 logic signed [0:THROUGHPUT-1][DATA_WIDTH-1:0] currentIn;
 logic track_out;
 logic switch;
@@ -39,9 +41,10 @@ tcn #(
     .FRAC_BITS(FRAC_BITS),
     .KERNEL_SIZE(K), .LAYERS(L), 
     .HIDDEN_CHANNELS(HC), 
-    .DIALATION_BASE(D), 
+    .DILATION_BASE(D), 
     .MODEL_TYPE(MODEL_TYPE),
-    .THROUGHPUT(THROUGHPUT)
+    .THROUGHPUT(THROUGHPUT),
+    .STRIDES(STRIDES)
 ) Network1 (
     .clk(clk), 
     .in(currentIn), 
@@ -83,7 +86,7 @@ initial begin
 
     #FINISH_TIME
 
-    $writememh($sformatf("%s_output.mem", MODEL_TYPE), allOutput, 0, SAMPLES-1);
+    $writememh($sformatf("%s_output.mem", MODEL_TYPE), allOutput, 0, OUT_SAMPLES-1);
     $finish;
 end
 
@@ -104,26 +107,25 @@ always begin
 end
 
 always @(posedge update_cycle) begin //attempting to simulate how data would come in
-    for (int i = 0; i < SAMPLES-THROUGHPUT; i++) begin
+    for (int i = 0; i < (SAMPLES - THROUGHPUT); i++) begin
         all_samples[i] <= all_samples[i+THROUGHPUT];
     end
     //currentIn <= all_samples[0];
     for (int i = 0; i < THROUGHPUT; i++) begin
-        currentIn[THROUGHPUT-1-i] <= all_samples[i];
+        currentIn[i] <= all_samples[i];
     end
     samplenum += THROUGHPUT;
     switch <= 1;
 end
 
-
 always @(posedge clk) begin
     if (track_out) begin
-        for (int i = 0; i < $size(allOutput)-THROUGHPUT; i++) begin
-            allOutput[i] <= allOutput[i+THROUGHPUT];
+        for (int i = 0; i < $size(allOutput)-OUT_THROUGHPUT; i++) begin
+            allOutput[i] <= allOutput[i+OUT_THROUGHPUT];
         end
         //allOutput[$size(allOutput)-1] <= out;
-        for (int i = 0; i < THROUGHPUT; i++) begin
-            allOutput[$size(allOutput)-1-i] <= out[i];
+        for (int i = 0; i < OUT_THROUGHPUT; i++) begin
+            allOutput[$size(allOutput)-OUT_THROUGHPUT+i] <= out[i];
         end
     end
 end
