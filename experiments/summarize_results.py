@@ -473,12 +473,18 @@ def noise_floor_evm_pct(ed_val_exp_dir: str, validation_run_id: str) -> float:
     return float(np.sqrt(noise_power.sum() / np.sum(np.abs(reference) ** 2)) * 100)
 
 
-def plot_pareto_evm(run_configs: list[dict], excess_over_noise_floor: bool) -> None:
+def plot_pareto_evm(run_configs: list[dict], excess_over_noise_floor: bool,
+                    show_one_tap_baseline: bool) -> None:
     """With excess_over_noise_floor, each seed's value is sqrt(EVM² - floor²) using that run's own
     floor. Errors add as powers, so this is the part of the EVM the channel model can still
     remove, and a log axis keeps differences visible as it approaches zero. The value is signed:
     a seed measured below its floor estimate goes negative and drops off the log axis, and those
-    seeds are counted instead."""
+    seeds are counted instead.
+
+    With show_one_tap_baseline, a dashed line marks the receiver-side one-tap LS EVM at its best
+    measured sent-power bin."""
+    if excess_over_noise_floor and show_one_tap_baseline:
+        raise ValueError("the one-tap baseline has no noise-floor measurement to subtract")
     n = len(run_configs)
 
     fig, axes_flat, needs_ylabel, needs_xlabel = _panel_grid(n)
@@ -547,6 +553,11 @@ def plot_pareto_evm(run_configs: list[dict], excess_over_noise_floor: bool) -> N
                             markersize=SEED_DOT_SIZE, markerfacecolor=style["color"],
                             markeredgecolor="none", alpha=SEED_DOT_ALPHA, zorder=2)
 
+        if show_one_tap_baseline:
+            best_one_tap_evm = float(np.nanmin(one_tap_power_bin_evms(*load_one_tap_inputs(cfg))))
+            ax.axhline(best_one_tap_evm, color="0.4", linestyle="--", linewidth=1.0, zorder=1,
+                       label="1-tap LS (best measured power)")
+
         _decade_only_log_xaxis(ax)
         if excess_over_noise_floor:
             ax.set_yscale("log")
@@ -570,6 +581,8 @@ def plot_pareto_evm(run_configs: list[dict], excess_over_noise_floor: bool) -> N
                         labelspacing=0.3, borderpad=0.4)
 
     file_stem = "pareto_excess_evm" if excess_over_noise_floor else "pareto_evm"
+    if show_one_tap_baseline:
+        file_stem += "_one_tap"
     plt.savefig(PLOT_PATH / f"{file_stem}.svg", format="svg", bbox_inches="tight")
     plt.savefig(PLOT_PATH / f"{file_stem}.png", bbox_inches="tight")
     plt.show()
@@ -1147,6 +1160,7 @@ def rate_tables(run_configs: list[dict]) -> tuple[pd.DataFrame, pd.DataFrame]:
                 "channel_run_id": channel_run_id,
                 "num_params": channel_run["num_params"],
                 "spectral_efficiency_bps_per_hz": float(np.median(ed_rates)) / used_band_hz,
+                "rate_mbps": float(np.median(ed_rates)) / 1e6,
                 "noise_floor_rate_mbps": float(np.median(floor_rates)) / 1e6,
                 "pct_of_noise_floor_rate": float(np.median(100 * ed_rates / floor_rates)),
             })
@@ -1170,6 +1184,7 @@ def rate_tables(run_configs: list[dict]) -> tuple[pd.DataFrame, pd.DataFrame]:
              "channel_run_id": best_by_group[(dc_ma, family_key)]["channel_run_id"],
              "num_params": best_by_group[(dc_ma, family_key)]["num_params"],
              "spectral_efficiency_bps_per_hz": best_by_group[(dc_ma, family_key)]["spectral_efficiency_bps_per_hz"],
+             "rate_mbps": best_by_group[(dc_ma, family_key)]["rate_mbps"],
              "noise_floor_rate_mbps": best_by_group[(dc_ma, family_key)]["noise_floor_rate_mbps"],
              "pct_of_noise_floor_rate": best_by_group[(dc_ma, family_key)]["pct_of_noise_floor_rate"]}
             for dc_ma, family_key in sorted_groups
@@ -1181,6 +1196,123 @@ def rate_tables(run_configs: list[dict]) -> tuple[pd.DataFrame, pd.DataFrame]:
         tables.append(table)
 
     return tables[0], tables[1]
+
+
+ONE_TAP_TITLE = "Receiver-Side One-Tap LS Equalization EVM% vs. Sent Power"
+ONE_TAP_POWER_BIN_EDGES = np.linspace(0.1, 1.5, 8)
+
+
+def one_tap_evm_in_power_range(sent_spectrum: np.ndarray, received_spectrum: np.ndarray,
+                               sent_power: np.ndarray, is_held_out: np.ndarray,
+                               power_low: float, power_high: float) -> tuple[float, int]:
+    """Mean per-symbol EVM% of held-out symbols whose sent power lies in [power_low, power_high],
+    after one complex tap per subcarrier fit by least squares on the training symbols in that
+    same range. Solving min ||X - w Y||^2 gives the single tap that minimizes training EVM.
+    Returns (evm_pct, held-out symbol count), with NaN EVM when the range holds no symbols."""
+    in_range = (sent_power >= power_low) & (sent_power <= power_high)
+    is_train = in_range & ~is_held_out
+    is_test = in_range & is_held_out
+    if not is_train.any() or not is_test.any():
+        return float("nan"), int(is_test.sum())
+
+    train_sent = sent_spectrum[is_train]
+    train_received = received_spectrum[is_train]
+    taps = np.sum(train_sent * np.conj(train_received), axis=0) / np.sum(np.abs(train_received) ** 2, axis=0)
+
+    equalized = taps * received_spectrum[is_test]
+    residual_power = np.mean(np.abs(sent_spectrum[is_test] - equalized) ** 2, axis=1)
+    signal_power = np.mean(np.abs(sent_spectrum[is_test]) ** 2, axis=1)
+    return float(np.mean(np.sqrt(residual_power / signal_power)) * 100), int(is_test.sum())
+
+
+def load_one_tap_inputs(cfg: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """(sent_spectrum, received_spectrum, sent_power, is_held_out) for one DC bias's channel-model
+    dataset. The held-out mask reproduces the channel models' validation split from the seed and
+    validation fraction in their experiment config."""
+    sent, received, active_carrier_indices, _ = load_dataset(cfg["dataset_path"])
+    sent = sent.cpu().numpy()
+    received = received.cpu().numpy()
+    sent_power = np.mean(sent ** 2, axis=1)
+    sent_spectrum = np.fft.rfft(sent, norm="ortho", axis=-1)[:, active_carrier_indices]
+    received_spectrum = np.fft.rfft(received, norm="ortho", axis=-1)[:, active_carrier_indices]
+
+    exp_config = yaml.safe_load((_resolve(cfg["channel_exp_dir"]) / "experiment_config.yaml").read_text())
+    num_symbols = sent.shape[0]
+    num_held_out = round(num_symbols * float(exp_config["val_fraction"]))
+    permutation = torch.randperm(num_symbols, generator=torch.Generator().manual_seed(int(exp_config["seed"])))
+    is_held_out = np.zeros(num_symbols, dtype=bool)
+    is_held_out[permutation[:num_held_out].numpy()] = True
+    return sent_spectrum, received_spectrum, sent_power, is_held_out
+
+
+def one_tap_power_bin_evms(sent_spectrum: np.ndarray, received_spectrum: np.ndarray,
+                           sent_power: np.ndarray, is_held_out: np.ndarray) -> np.ndarray:
+    """One-tap EVM% within each ONE_TAP_POWER_BIN_EDGES bin, with the taps refit per bin."""
+    return np.array([
+        one_tap_evm_in_power_range(sent_spectrum, received_spectrum, sent_power, is_held_out,
+                                   bin_low, bin_high)[0]
+        for bin_low, bin_high in zip(ONE_TAP_POWER_BIN_EDGES[:-1], ONE_TAP_POWER_BIN_EDGES[1:])
+    ])
+
+
+def one_tap_baseline(run_configs: list[dict]) -> pd.DataFrame:
+    """Receiver-side one-tap equalizer on the raw (no E/D) channel-model training data at each
+    DC bias. Taps are fit on the channel models' training split and scored on their held-out
+    split. EVM depends strongly on drive power, so it is reported within each sent-power bin
+    and within the validated encoders' operating band. The data is 128-APSK, not the QPSK used
+    for E/D validation."""
+    fig, axes_flat, needs_ylabel, needs_xlabel = _panel_grid(len(run_configs))
+    bin_centers = (ONE_TAP_POWER_BIN_EDGES[:-1] + ONE_TAP_POWER_BIN_EDGES[1:]) / 2
+
+    table_rows = []
+    for panel_index, cfg in enumerate(run_configs):
+        sent_spectrum, received_spectrum, sent_power, is_held_out = load_one_tap_inputs(cfg)
+
+        all_power_evm, all_power_count = one_tap_evm_in_power_range(
+            sent_spectrum, received_spectrum, sent_power, is_held_out, -np.inf, np.inf)
+
+        validation_rows = _read_jsonl(_resolve(cfg["ed_val_exp_dir"]) / "runs.jsonl")
+        band_low, band_high = _operating_power_band(validation_rows)
+        band_evm, band_count = one_tap_evm_in_power_range(
+            sent_spectrum, received_spectrum, sent_power, is_held_out, band_low, band_high)
+
+        bin_evms = one_tap_power_bin_evms(sent_spectrum, received_spectrum, sent_power, is_held_out)
+
+        table_rows.append({
+            "dc_ma": cfg["dc_ma"],
+            "best_power_bin_evm_pct": float(np.nanmin(bin_evms)),
+            "all_power_evm_pct": all_power_evm,
+            "all_power_held_out_symbols": all_power_count,
+            "operating_band_low": band_low,
+            "operating_band_high": band_high,
+            "operating_band_evm_pct": band_evm,
+            "operating_band_held_out_symbols": band_count,
+        })
+
+        ax = axes_flat[panel_index]
+        ax.plot(bin_centers, bin_evms, color="#0072B2", marker="o", markersize=3, linewidth=1.2)
+        ax.axvspan(band_low, band_high, color="#D55E00", alpha=0.2, label="E/D operating band")
+        ax.set_title(f"{cfg['dc_ma']} mA", fontsize=_FONT)
+        ax.grid(True)
+        ax.text(0.05, 0.95, _PANEL_LABELS[panel_index], transform=ax.transAxes,
+                fontsize=_FONT, va="top", ha="left")
+        ax.tick_params(labelbottom=True)
+        if needs_ylabel[panel_index]:
+            ax.set_ylabel("One-Tap EVM (%)")
+        if needs_xlabel[panel_index]:
+            ax.set_xlabel("Sent Symbol Power")
+
+    fig.suptitle(ONE_TAP_TITLE + _run_suffix(run_configs[0]), fontsize=_FONT)
+    axes_flat[0].legend(loc="lower right", fontsize=_SMALL)
+    plt.savefig(PLOT_PATH / "one_tap_baseline.svg", format="svg", bbox_inches="tight")
+    plt.savefig(PLOT_PATH / "one_tap_baseline.png", bbox_inches="tight")
+    plt.show()
+
+    table = pd.DataFrame.from_records(table_rows)
+    table.to_csv(PLOT_PATH / "one_tap_baseline.csv", index=False)
+    print("\nReceiver-side one-tap LS baseline (held-out channel-model data):")
+    print(table.to_string(index=False, float_format=lambda value: f"{value:.3f}"))
+    return table
 
 
 
@@ -1197,10 +1329,13 @@ if __name__ == "__main__":
     plot_val_rrmse_vs_params(run_configs)
 
     print("Plot 3 - Pareto: channel params vs experimental EVM% ...")
-    plot_pareto_evm(run_configs, excess_over_noise_floor=False)
+    plot_pareto_evm(run_configs, excess_over_noise_floor=False, show_one_tap_baseline=False)
+
+    print("Plot 3a - Pareto with the receiver-side one-tap LS baseline ...")
+    plot_pareto_evm(run_configs, excess_over_noise_floor=False, show_one_tap_baseline=True)
 
     print("Plot 3b - Pareto: channel params vs EVM in excess of the noise floor ...")
-    plot_pareto_evm(run_configs, excess_over_noise_floor=True)
+    plot_pareto_evm(run_configs, excess_over_noise_floor=True, show_one_tap_baseline=False)
 
     # print("Plot 4 - Channel RRMSE (aggregate vs operating band) vs paired-encoder EVM ...")
     # plot_rrmse_evm_scatter(run_configs)
@@ -1213,6 +1348,9 @@ if __name__ == "__main__":
 
     print("Tables - Gaussian achievable rate per channel-model family ...")
     rate_tables(run_configs)
+
+    print("Table - Receiver-side one-tap LS baseline ...")
+    one_tap_baseline(run_configs)
 
     # print("Plot 7 - Gaussian wave packet TCN response ...")
     # plot_packet_response(run_configs)
